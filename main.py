@@ -315,7 +315,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
     current_chapter = 1
     errors = 0
     batch = []
-    BATCH_SIZE = 10  # زيادة حجم الدفعة
+    BATCH_SIZE = 15  # زيادة حجم الدفعة
     
     while current_chapter < 5000 and errors < 15:
         if current_chapter in existing_chapters:
@@ -1671,7 +1671,7 @@ def scheduler_loop():
                 SCHEDULER_CONFIG['next_run'] = now + SCHEDULER_CONFIG['interval_seconds']
                 SCHEDULER_CONFIG['status'] = 'idle'
             
-            time.sleep(5)  # زيادة زمن النوم إلى 10 ثوانٍ
+            time.sleep(10)  # زيادة زمن النوم إلى 10 ثوانٍ
         except Exception as e:
             print(f"🔥 [Scheduler] Critical Loop Error: {e}")
             time.sleep(60)
