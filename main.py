@@ -1299,7 +1299,7 @@ def worker_fanmtl_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# 🟡 7. NovelBin Logic (مُحدّث بالكامل لجلب جميع الفصول)
+# 🟡 7. NovelBin Logic (مُحدّث بالكامل لجلب جميع الفصول مع معالجة 429)
 # ==========================================
 
 def clean_novelbin_title(raw_title):
@@ -1485,49 +1485,62 @@ def fetch_chapter_list_novelbin(novel_url, novel_id):
         traceback.print_exc()
         return chapters
 
-def scrape_chapter_novelbin(chapter_url):
-    """استخراج محتوى الفصل من novelbin.com - نسخة محسنة"""
-    try:
-        response = requests.get(chapter_url, headers=get_headers(), timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ NovelBin chapter scrape failed with status {response.status_code}")
-            return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+def scrape_chapter_novelbin(chapter_url, max_retries=5):
+    """استخراج محتوى الفصل من novelbin.com مع إعادة المحاولة عند تلقي 429"""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(chapter_url, headers=get_headers(), timeout=15)
+            
+            if response.status_code == 429:
+                wait_time = (attempt + 1) * 10  # 10, 20, 30, 40, 50 ثانية
+                print(f"⚠️ Rate limited (429) for {chapter_url}. Waiting {wait_time}s before retry {attempt+1}/{max_retries}")
+                time.sleep(wait_time)
+                continue
+                
+            if response.status_code != 200:
+                print(f"⚠️ NovelBin chapter scrape failed with status {response.status_code}")
+                return None
+                
+            soup = BeautifulSoup(response.content, 'html.parser')
 
-        # محتوى الفصل داخل div#chr-content
-        content_div = soup.find('div', id='chr-content')
-        if not content_div:
-            print("⚠️ Could not find #chr-content")
-            return None
+            # محتوى الفصل داخل div#chr-content
+            content_div = soup.find('div', id='chr-content')
+            if not content_div:
+                print("⚠️ Could not find #chr-content")
+                return None
 
-        # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص زائدة)
-        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button']):
-            # نحتفظ بالنص، فقط نزيل العناصر التي قد تحوي إعلانات
-            if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'pf-']):
-                bad.decompose()
-            elif bad.get('id') and any(c in bad.get('id').lower() for c in ['ad', 'ads', 'banner']):
-                bad.decompose()
-            else:
-                # بدلاً من decompose، نستبدل بمسافة للحفاظ على النص المحيط
-                bad.replace_with(' ')
+            # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص زائدة)
+            for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button']):
+                # نحتفظ بالنص، فقط نزيل العناصر التي قد تحوي إعلانات
+                if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'pf-']):
+                    bad.decompose()
+                elif bad.get('id') and any(c in bad.get('id').lower() for c in ['ad', 'ads', 'banner']):
+                    bad.decompose()
+                else:
+                    # بدلاً من decompose، نستبدل بمسافة للحفاظ على النص المحيط
+                    bad.replace_with(' ')
 
-        # إزالة عناصر div التي تحوي إعلانات
-        for div in content_div.find_all('div', class_=re.compile(r'(ad|banner|popup|pf-)', re.I)):
-            div.decompose()
+            # إزالة عناصر div التي تحوي إعلانات
+            for div in content_div.find_all('div', class_=re.compile(r'(ad|banner|popup|pf-)', re.I)):
+                div.decompose()
 
-        # الحصول على النص
-        text = content_div.get_text(separator="\n\n", strip=True)
-        # تنظيف الأسطر الفارغة المتعددة
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        # إزالة بعض العبارات الدعائية الشائعة
-        text = re.sub(r'Read .*? at .*?\.com', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'If you find any errors .*? please let us know', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'Support .*? by reading .*? online', '', text, flags=re.IGNORECASE)
-        return text.strip()
-    except Exception as e:
-        print(f"❌ Error scraping NovelBin chapter: {e}")
-        traceback.print_exc()
-        return None
+            # الحصول على النص
+            text = content_div.get_text(separator="\n\n", strip=True)
+            # تنظيف الأسطر الفارغة المتعددة
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            # إزالة بعض العبارات الدعائية الشائعة
+            text = re.sub(r'Read .*? at .*?\.com', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'If you find any errors .*? please let us know', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'Support .*? by reading .*? online', '', text, flags=re.IGNORECASE)
+            return text.strip()
+            
+        except Exception as e:
+            print(f"❌ Error scraping NovelBin chapter (attempt {attempt+1}): {e}")
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(5)
+    
+    return None
 
 def worker_novelbin_list(url, admin_email, metadata):
     """العامل الرئيسي لجلب جميع فصول novelbin.com"""
@@ -1565,7 +1578,10 @@ def worker_novelbin_list(url, admin_email, metadata):
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 print(f"📤 Sent batch of {len(batch)} chapters")
                 batch = []
-                time.sleep(1.5)
+                # زيادة وقت الانتظار بين الدُفعات لتجنب 429
+                time.sleep(3)
+        else:
+            print(f"❌ Failed to scrape chapter {chap['number']} after retries")
 
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
