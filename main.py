@@ -1588,26 +1588,21 @@ def worker_novelbin_list(url, admin_email, metadata):
         print(f"📤 Sent final batch of {len(batch)} chapters")
 
 # ==========================================
-# 🔵 8. 69 Shuba (69shuba.com) Logic
+# 🔵 8. 69 Shuba (69shuba.com) Logic (No Cookies)
 # ==========================================
 
 def fetch_metadata_shuba(url):
     """
-    استخراج بيانات الرواية من 69shuba.com
-    مثال الرابط: https://www.69shuba.com/book/89407.htm
+    استخراج بيانات الرواية من 69shuba.com بدون استخدام كوكيز ثابتة
     """
     try:
-        # استخدام هيدرات مشابهة للمتصفح مع الكوكيز المقدمة من المستخدم
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+        # استخدام الهيدرات العامة من دالة get_headers (بدون كوكيز)
+        headers = get_headers(referer='https://www.69shuba.com/')
+        # إضافة بعض الهيدرات الخاصة بالموقع إذا لزم الأمر (دون كوكيز)
+        headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-            'Referer': 'https://www.69shuba.com/',
-            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
-            'sec-ch-ua': '"Not_A Brand";v="99", "Google Chrome";v="109", "Chromium";v="109"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-        }
+        })
         
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
@@ -1719,8 +1714,7 @@ def fetch_metadata_shuba(url):
 
 def fetch_chapter_list_shuba(novel_url, novel_id):
     """
-    استخراج قائمة الفصول من صفحة الفهرس
-    مثال رابط الفهرس: https://www.69shuba.com/book/89407/
+    استخراج قائمة الفصول من صفحة الفهرس بدون استخدام كوكيز ثابتة
     """
     chapters = []
     # بناء رابط الفهرس (بإزالة .htm إذا وجد)
@@ -1730,13 +1724,11 @@ def fetch_chapter_list_shuba(novel_url, novel_id):
         index_url = novel_url.rstrip('/') + '/'
     
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
+        headers = get_headers(referer=novel_url)
+        headers.update({
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-            'Referer': novel_url,
-            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
-        }
+        })
         
         print(f"🔍 Fetching chapters from 69shuba index: {index_url}")
         response = requests.get(index_url, headers=headers, timeout=15)
@@ -1811,16 +1803,14 @@ def fetch_chapter_list_shuba(novel_url, novel_id):
 
 def scrape_chapter_shuba(chapter_url):
     """
-    استخراج محتوى الفصل من 69shuba.com
+    استخراج محتوى الفصل من 69shuba.com بدون استخدام كوكيز ثابتة
     """
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
+        headers = get_headers(referer='https://www.69shuba.com/')
+        headers.update({
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-            'Referer': 'https://www.69shuba.com/',
-            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
-        }
+        })
         
         response = requests.get(chapter_url, headers=headers, timeout=15)
         if response.status_code != 200:
@@ -1868,6 +1858,7 @@ def scrape_chapter_shuba(chapter_url):
         print(f"❌ Error scraping 69shuba chapter: {e}")
         traceback.print_exc()
         return None
+        
 
 def worker_shuba_list(url, admin_email, metadata):
     """
