@@ -1588,114 +1588,65 @@ def worker_novelbin_list(url, admin_email, metadata):
         print(f"📤 Sent final batch of {len(batch)} chapters")
 
 # ==========================================
-# 🔵 8. 69 Shuba (69shuba.com) Logic (No Cookies)
+# 🟤 8. NovelFull (novelfull.net) Logic
 # ==========================================
 
-def fetch_metadata_shuba(url):
-    """
-    استخراج بيانات الرواية من 69shuba.com بدون استخدام كوكيز ثابتة
-    """
+def fetch_metadata_novelfull(url):
     try:
-        # استخدام الهيدرات العامة من دالة get_headers (بدون كوكيز)
-        headers = get_headers(referer='https://www.69shuba.com/')
-        # إضافة بعض الهيدرات الخاصة بالموقع إذا لزم الأمر (دون كوكيز)
-        headers.update({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-        })
-        
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
-            print(f"⚠️ 69shuba metadata fetch failed with status {response.status_code}")
             return None
-
-        # الموقع يستخدم ترميز gbk
-        response.encoding = 'gbk'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # 1. العنوان - البحث في meta og:title أو h1
-        title = "Unknown Title"
-        og_title = soup.find('meta', property='og:title')
-        if og_title:
-            title = og_title.get('content', '')
-        else:
-            h1_tag = soup.find('h1')
-            if h1_tag:
-                title = h1_tag.get_text(strip=True)
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        # تنظيف العنوان من النصوص الإضافية مثل "无弹窗,最新章节阅读"
-        title = re.sub(r'[-_|].*$', '', title).strip()
-        print(f"📌 Extracted title: {title}")
-
-        # 2. الغلاف
+        # Title from meta og:title
+        title_tag = soup.find("meta", property="og:title")
+        title = title_tag["content"] if title_tag else "Unknown Title"
+        # Clean if necessary (remove " - NovelFull" etc)
+        title = re.sub(r'\s*[-–|]\s*(?:NovelFull|Read.*?online).*$', '', title, flags=re.IGNORECASE).strip()
+        
+        # Cover
         cover = ""
-        og_image = soup.find('meta', property='og:image')
-        if og_image:
-            cover = og_image.get('content', '')
+        img_tag = soup.select_one('.book img')
+        if img_tag:
+            cover = img_tag.get('src')
+        # Use og:image as fallback
         if not cover:
-            img_tag = soup.select_one('.bookimg2 img')
-            if img_tag:
-                cover = img_tag.get('src', '')
-        cover = fix_image_url(cover, base_url='https://www.69shuba.com')
-        print(f"📌 Cover: {cover}")
-
-        # 3. الوصف
+            og_img = soup.find("meta", property="og:image")
+            if og_img:
+                cover = og_img["content"]
+        cover = fix_image_url(cover, base_url='https://novelfull.net')
+        
+        # Description
+        desc_div = soup.select_one('.desc-text')
         description = ""
-        og_desc = soup.find('meta', property='og:description')
-        if og_desc:
-            description = og_desc.get('content', '').strip()
-        if not description:
-            desc_div = soup.select_one('.navtxt p')
-            if desc_div:
-                description = desc_div.get_text(strip=True)
-        print(f"📌 Description length: {len(description)}")
-
-        # 4. الحالة (مستمرة / مكتملة)
+        if desc_div:
+            # get all paragraphs inside
+            paras = desc_div.find_all('p')
+            description = "\n\n".join([p.get_text(strip=True) for p in paras if p.get_text(strip=True)])
+        else:
+            # fallback to meta description
+            desc_meta = soup.find("meta", attrs={"name": "description"})
+            if desc_meta:
+                description = desc_meta["content"]
+        
+        # Status
         status = "مستمرة"
-        # البحث في النص أو في meta
-        if '全本' in response.text or 'مكتملة' in response.text:
-            status = "مكتملة"
-        # meta og:novel:status
-        status_meta = soup.find('meta', property='og:novel:status')
-        if status_meta and '全本' in status_meta.get('content', ''):
-            status = "مكتملة"
-        print(f"📌 Status: {status}")
-
-        # 5. التصنيفات
+        status_link = soup.select_one('.info a[href*="status"]')
+        if status_link:
+            status_text = status_link.get_text(strip=True).lower()
+            if 'completed' in status_text or 'مكتملة' in status_text:
+                status = "مكتملة"
+        
+        # Tags
         tags = []
-        # البحث عن رابط التصنيف
-        category_link = soup.select_one('.bread a[href*="class"]')
-        if category_link:
-            tags.append(category_link.get_text(strip=True))
-        # meta keywords
-        keywords_meta = soup.find('meta', attrs={'name': 'keywords'})
-        if keywords_meta:
-            keywords = keywords_meta.get('content', '').split(',')
-            tags.extend([k.strip() for k in keywords if k.strip()][:3])
+        genre_links = soup.select('.info a[href*="genre"]')
+        for link in genre_links:
+            tags.append(link.get_text(strip=True))
         category = tags[0] if tags else "عام"
-        print(f"📌 Tags: {tags}")
-
-        # 6. آخر تحديث
+        
+        # Last Update - try to find from latest chapter maybe, but leave None for now
         last_update = None
-        update_meta = soup.find('meta', property='og:novel:update_time')
-        if update_meta:
-            last_update = update_meta.get('content')
-        if not last_update:
-            # البحث عن تاريخ التحديث في النص
-            update_text = soup.find('p', string=re.compile(r'更新：|update', re.I))
-            if update_text:
-                date_match = re.search(r'(\d{4}-\d{1,2}-\d{1,2})', update_text.get_text())
-                if date_match:
-                    last_update = parse_relative_date(date_match.group(1))
-        print(f"📌 Last update: {last_update}")
-
-        # 7. استخراج معرف الرواية من الرابط
-        novel_id = None
-        match = re.search(r'/book/(\d+)', url)
-        if match:
-            novel_id = match.group(1)
-        print(f"📌 Novel ID: {novel_id}")
-
+        
         return {
             'title': title,
             'description': description,
@@ -1704,205 +1655,191 @@ def fetch_metadata_shuba(url):
             'category': category,
             'tags': tags,
             'sourceUrl': url,
-            'novel_id': novel_id,
             'lastUpdate': last_update
         }
     except Exception as e:
-        print(f"❌ Error 69shuba metadata: {e}")
+        print(f"Error NovelFull metadata: {e}")
         traceback.print_exc()
         return None
 
-def fetch_chapter_list_shuba(novel_url, novel_id):
-    """
-    استخراج قائمة الفصول من صفحة الفهرس بدون استخدام كوكيز ثابتة
-    """
+def fetch_chapter_list_novelfull(novel_url):
+    """جلب جميع الفصول من novelfull.net مع التنقل بين الصفحات"""
     chapters = []
-    # بناء رابط الفهرس (بإزالة .htm إذا وجد)
-    if novel_url.endswith('.htm'):
-        index_url = novel_url.replace('.htm', '/')
-    else:
-        index_url = novel_url.rstrip('/') + '/'
+    base_url = 'https://novelfull.net'
+    # التأكد من أن الرابط الرئيسي للرواية (بدون page parameter)
+    # الرابط قد يكون مثل https://novelfull.net/infinite-mana-in-the-apocalypse.html
+    # لكن قد يكون مع page، لذا نأخذ الجزء الأساسي
+    parsed = urlparse(novel_url)
+    path = parsed.path
+    # إزالة أي query parameters
+    base_novel_url = f"{parsed.scheme}://{parsed.netloc}{path}"
     
-    try:
-        headers = get_headers(referer=novel_url)
-        headers.update({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-        })
+    page = 1
+    while True:
+        if page == 1:
+            page_url = base_novel_url
+        else:
+            page_url = f"{base_novel_url}?page={page}"
         
-        print(f"🔍 Fetching chapters from 69shuba index: {index_url}")
-        response = requests.get(index_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Failed to fetch index page: {response.status_code}")
-            return chapters
-
-        response.encoding = 'gbk'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # البحث عن قائمة الفصول في div.catalog
-        catalog_div = soup.find('div', class_='catalog', id='catalog')
-        if not catalog_div:
-            print("⚠️ Could not find catalog div")
-            return chapters
-
-        # الفصول موجودة في عناصر li داخل ul
-        chapter_items = catalog_div.select('ul li')
-        print(f"📌 Found {len(chapter_items)} chapter items in catalog")
-
-        for item in chapter_items:
-            a_tag = item.find('a')
-            if not a_tag:
-                continue
-
-            href = a_tag.get('href', '')
-            # بناء الرابط الكامل
-            if href.startswith('/'):
-                full_url = 'https://www.69shuba.com' + href
-            else:
-                full_url = urljoin('https://www.69shuba.com', href)
-
-            raw_title = a_tag.get_text(strip=True)
+        print(f"🔍 Fetching NovelFull chapters page {page}: {page_url}")
+        try:
+            response = requests.get(page_url, headers=get_headers(), timeout=15)
+            if response.status_code != 200:
+                break
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            # استخراج رقم الفصل من data-num أو من النص
-            number = 0
-            if item.has_attr('data-num'):
-                try:
-                    number = int(item['data-num'])
-                except:
-                    pass
+            # الفصول موجودة في ul.list-chapter داخل div#list-chapter
+            # قد يكون هناك عمودين (كل عمود فيه ul). نبحث عن جميع ul.list-chapter
+            chapter_lists = soup.select('#list-chapter ul.list-chapter')
+            if not chapter_lists:
+                # إذا لم نجد، ربما لا توجد فصول في هذه الصفحة
+                break
             
-            if number == 0:
-                # محاولة استخراج الرقم من النص (第N章)
-                num_match = re.search(r'第(\d+)章', raw_title)
-                if num_match:
-                    number = int(num_match.group(1))
-                else:
-                    # محاولة استخراج الرقم من الرابط
-                    num_match = re.search(r'/(\d+)$', href.rstrip('/'))
+            found_in_page = 0
+            for ul in chapter_lists:
+                items = ul.find_all('li')
+                for li in items:
+                    a = li.find('a')
+                    if not a:
+                        continue
+                    href = a.get('href')
+                    # href قد يكون نسبي مثل '/infinite-mana-in-the-apocalypse/chapter-1-awaken.html'
+                    if href.startswith('/'):
+                        full_url = base_url + href
+                    else:
+                        full_url = href
+                    
+                    # استخراج النص داخل span.chapter-text إن وجد، وإلا استخدم نص الرابط
+                    span = a.find('span', class_='chapter-text')
+                    if span:
+                        raw_title = span.get_text(strip=True)
+                    else:
+                        raw_title = a.get_text(strip=True)
+                    
+                    # استخراج رقم الفصل من الرابط
+                    # مثال: /chapter-123-some-title
+                    num_match = re.search(r'/chapter-(\d+)', href, re.IGNORECASE)
+                    number = 0
                     if num_match:
                         number = int(num_match.group(1))
+                    else:
+                        # محاولة من العنوان
+                        num_match = re.search(r'Chapter\s+(\d+)', raw_title, re.IGNORECASE)
+                        if num_match:
+                            number = int(num_match.group(1))
+                    
+                    if number > 0:
+                        chapters.append({
+                            'number': number,
+                            'url': full_url,
+                            'title': raw_title
+                        })
+                        found_in_page += 1
+            
+            if found_in_page == 0:
+                # لا فصول في هذه الصفحة، ربما انتهينا
+                break
+            
+            # التحقق من وجود صفحة تالية
+            next_link = soup.select_one('ul.pagination li.next a')
+            if not next_link:
+                # قد يكون هناك زر "Next" نصي أو رمز >
+                next_link = soup.select_one('ul.pagination li a[rel="next"]')
+            
+            if next_link:
+                page += 1
+                time.sleep(0.5)  # تأخير بسيط
+            else:
+                break
+        except Exception as e:
+            print(f"Error fetching page {page}: {e}")
+            break
+    
+    # إزالة التكرار (قد يحدث إذا تكررت الفصول)
+    unique = {c['number']: c for c in chapters}.values()
+    chapters = sorted(unique, key=lambda x: x['number'])
+    print(f"✅ Total chapters found for NovelFull: {len(chapters)}")
+    return chapters
 
-            if number > 0:
-                # تنظيف العنوان: إزالة "第N章" من البداية
-                clean_title = re.sub(r'^第\d+章\s*', '', raw_title).strip()
-                chapters.append({
-                    'number': number,
-                    'url': full_url,
-                    'title': clean_title if clean_title else raw_title
-                })
-
-        # ترتيب الفصول حسب الرقم
-        chapters.sort(key=lambda x: x['number'])
-        print(f"✅ Total chapters extracted: {len(chapters)}")
-        return chapters
-
-    except Exception as e:
-        print(f"❌ Error fetching 69shuba chapter list: {e}")
-        traceback.print_exc()
-        return chapters
-
-def scrape_chapter_shuba(chapter_url):
-    """
-    استخراج محتوى الفصل من 69shuba.com بدون استخدام كوكيز ثابتة
-    """
+def scrape_chapter_novelfull(chapter_url):
     try:
-        headers = get_headers(referer='https://www.69shuba.com/')
-        headers.update({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-        })
-        
-        response = requests.get(chapter_url, headers=headers, timeout=15)
+        response = requests.get(chapter_url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
-            print(f"⚠️ Failed to fetch chapter: {response.status_code}")
             return None
-
-        response.encoding = 'gbk'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # البحث عن محتوى الفصل داخل div.txtnav
-        content_div = soup.find('div', class_='txtnav')
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # محتوى الفصل داخل div#chapter-content
+        content_div = soup.find('div', id='chapter-content')
         if not content_div:
-            print("⚠️ Could not find txtnav div")
             return None
-
-        # إزالة العناصر غير المرغوب فيها
-        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button', 'div']):
-            # إزالة الإعلانات والعناصر غير النصية
-            if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'contentadv', 'bottom-ad']):
-                bad.decompose()
-            elif bad.get('id') and any(c in bad.get('id').lower() for c in ['ad', 'ads', 'banner']):
-                bad.decompose()
-
-        # استخراج النص
-        # النص يكون عادةً على شكل "&emsp;&emsp;نص الفصل"
-        # نحصل على كل النص وننظفه
-        text = content_div.get_text(separator="\n", strip=True)
         
-        # إزالة علامات &emsp; واستبدالها بمسافة
-        text = text.replace('&emsp;', ' ').replace('emsp', ' ')
+        # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص إضافية)
+        # نقوم بإزالة بعض divs التي تحمل إعلانات مثل <div align="center"> وغيرها
+        for unwanted in content_div.find_all(['div', 'script', 'ins', 'iframe', 'button']):
+            # نتحقق من وجود class أو id يشير إلى إعلان
+            classes = unwanted.get('class', [])
+            ids = unwanted.get('id', '')
+            if any(ad in str(classes).lower() for ad in ['ad', 'ads', 'banner', 'pub', 'popup']) or \
+               any(ad in str(ids).lower() for ad in ['ad', 'ads', 'banner', 'pub', 'popup']):
+                unwanted.decompose()
+            elif unwanted.name == 'div' and unwanted.get('align') == 'center':
+                # غالبًا ما تكون هذه الإعلانات
+                unwanted.decompose()
         
-        # إزالة أسطر المعلومات مثل (本章完)
-        text = re.sub(r'\(本章完\)', '', text)
-        text = re.sub(r'\(本章未完,请翻页\)', '', text)
+        # استخراج النص من الفقرات
+        paragraphs = content_div.find_all('p')
+        if paragraphs:
+            text = "\n\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+        else:
+            # إذا لم توجد فقرات، نأخذ النص كاملاً مع تنظيف
+            text = content_div.get_text(separator="\n\n", strip=True)
         
-        # تنظيف الأسطر المتعددة
+        # تنظيف إضافي: إزالة الأسطر الفارغة المتعددة
         text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        # إزالة النصوص الدعائية
-        text = re.sub(r'请收藏本站：https://www\.69shuba\.com.*?\.com', '', text)
-        
         return text.strip()
-
     except Exception as e:
-        print(f"❌ Error scraping 69shuba chapter: {e}")
-        traceback.print_exc()
+        print(f"Error scraping NovelFull chapter: {e}")
         return None
 
-def worker_shuba_list(url, admin_email, metadata):
-    """
-    العامل الرئيسي لجلب جميع فصول 69shuba.com
-    """
+def worker_novelfull_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
-
-    # إرسال البيانات الأساسية
+    
+    # إرسال بيانات الرواية
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
-
-    novel_id = metadata.get('novel_id')
-    all_chapters = fetch_chapter_list_shuba(url, novel_id)
+    
+    all_chapters = fetch_chapter_list_novelfull(url)
     if not all_chapters:
-        print(f"❌ No chapters found for 69shuba: {metadata['title']}")
+        print(f"No chapters found for NovelFull: {metadata['title']}")
         return
-
-    print(f"📋 Processing {len(all_chapters)} chapters from 69shuba.")
+    
+    print(f"Processing {len(all_chapters)} chapters from NovelFull.")
     batch = []
-
+    
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
-            print(f"⏭️ Skipping existing chapter {chap['number']}")
+            print(f"Skipping existing chapter {chap['number']}")
             continue
-
-        print(f"📥 Scraping 69shuba: {metadata['title']} - Ch {chap['number']}...")
-        content = scrape_chapter_shuba(chap['url'])
+        
+        print(f"Scraping NovelFull: {metadata['title']} - Ch {chap['number']}...")
+        content = scrape_chapter_novelfull(chap['url'])
         if content:
             batch.append({
                 'number': chap['number'],
                 'title': chap['title'],
                 'content': content
             })
-            print(f"✅ Chapter {chap['number']} scraped successfully")
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
-                print(f"📤 Sent batch of {len(batch)} chapters")
+                print(f"Sent batch of {len(batch)} chapters")
                 batch = []
-                time.sleep(2)  # تأخير بين الدُفعات
+                time.sleep(1.5)
         else:
-            print(f"❌ Failed to scrape chapter {chap['number']}")
-
+            print(f"Failed to scrape chapter {chap['number']}")
+    
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
-        print(f"📤 Sent final batch of {len(batch)} chapters")
+        print(f"Sent final batch of {len(batch)} chapters")
 
 # ==========================================
 # Main Orchestrator
@@ -2004,12 +1941,12 @@ def trigger_scrape():
             thread.start()
             return jsonify({'message': 'Scraping started (NovelBin).'}), 200
 
-        elif '69shuba.com' in url:
-            meta = fetch_metadata_shuba(url)
+        elif 'novelfull.net' in url:
+            meta = fetch_metadata_novelfull(url)
             if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_shuba_list, args=(url, admin_email, meta))
+            thread = threading.Thread(target=worker_novelfull_list, args=(url, admin_email, meta))
             thread.start()
-            return jsonify({'message': 'Scraping started (69 Shuba).'}), 200
+            return jsonify({'message': 'Scraping started (NovelFull).'}), 200
 
         else:
             return jsonify({'message': 'Unsupported Domain'}), 400
@@ -2053,9 +1990,9 @@ def perform_single_scrape(url, admin_email):
         elif 'novelbin.com' in url:
             meta = fetch_metadata_novelbin(url)
             if meta: worker_novelbin_list(url, admin_email, meta)
-        elif '69shuba.com' in url:
-            meta = fetch_metadata_shuba(url)
-            if meta: worker_shuba_list(url, admin_email, meta)
+        elif 'novelfull.net' in url:
+            meta = fetch_metadata_novelfull(url)
+            if meta: worker_novelfull_list(url, admin_email, meta)
     except Exception as e:
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
