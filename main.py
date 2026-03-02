@@ -1588,6 +1588,333 @@ def worker_novelbin_list(url, admin_email, metadata):
         print(f"📤 Sent final batch of {len(batch)} chapters")
 
 # ==========================================
+# 🔵 8. 69 Shuba (69shuba.com) Logic
+# ==========================================
+
+def fetch_metadata_shuba(url):
+    """
+    استخراج بيانات الرواية من 69shuba.com
+    مثال الرابط: https://www.69shuba.com/book/89407.htm
+    """
+    try:
+        # استخدام هيدرات مشابهة للمتصفح مع الكوكيز المقدمة من المستخدم
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+            'Referer': 'https://www.69shuba.com/',
+            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
+            'sec-ch-ua': '"Not_A Brand";v="99", "Google Chrome";v="109", "Chromium";v="109"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ 69shuba metadata fetch failed with status {response.status_code}")
+            return None
+
+        # الموقع يستخدم ترميز gbk
+        response.encoding = 'gbk'
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # 1. العنوان - البحث في meta og:title أو h1
+        title = "Unknown Title"
+        og_title = soup.find('meta', property='og:title')
+        if og_title:
+            title = og_title.get('content', '')
+        else:
+            h1_tag = soup.find('h1')
+            if h1_tag:
+                title = h1_tag.get_text(strip=True)
+        
+        # تنظيف العنوان من النصوص الإضافية مثل "无弹窗,最新章节阅读"
+        title = re.sub(r'[-_|].*$', '', title).strip()
+        print(f"📌 Extracted title: {title}")
+
+        # 2. الغلاف
+        cover = ""
+        og_image = soup.find('meta', property='og:image')
+        if og_image:
+            cover = og_image.get('content', '')
+        if not cover:
+            img_tag = soup.select_one('.bookimg2 img')
+            if img_tag:
+                cover = img_tag.get('src', '')
+        cover = fix_image_url(cover, base_url='https://www.69shuba.com')
+        print(f"📌 Cover: {cover}")
+
+        # 3. الوصف
+        description = ""
+        og_desc = soup.find('meta', property='og:description')
+        if og_desc:
+            description = og_desc.get('content', '').strip()
+        if not description:
+            desc_div = soup.select_one('.navtxt p')
+            if desc_div:
+                description = desc_div.get_text(strip=True)
+        print(f"📌 Description length: {len(description)}")
+
+        # 4. الحالة (مستمرة / مكتملة)
+        status = "مستمرة"
+        # البحث في النص أو في meta
+        if '全本' in response.text or 'مكتملة' in response.text:
+            status = "مكتملة"
+        # meta og:novel:status
+        status_meta = soup.find('meta', property='og:novel:status')
+        if status_meta and '全本' in status_meta.get('content', ''):
+            status = "مكتملة"
+        print(f"📌 Status: {status}")
+
+        # 5. التصنيفات
+        tags = []
+        # البحث عن رابط التصنيف
+        category_link = soup.select_one('.bread a[href*="class"]')
+        if category_link:
+            tags.append(category_link.get_text(strip=True))
+        # meta keywords
+        keywords_meta = soup.find('meta', attrs={'name': 'keywords'})
+        if keywords_meta:
+            keywords = keywords_meta.get('content', '').split(',')
+            tags.extend([k.strip() for k in keywords if k.strip()][:3])
+        category = tags[0] if tags else "عام"
+        print(f"📌 Tags: {tags}")
+
+        # 6. آخر تحديث
+        last_update = None
+        update_meta = soup.find('meta', property='og:novel:update_time')
+        if update_meta:
+            last_update = update_meta.get('content')
+        if not last_update:
+            # البحث عن تاريخ التحديث في النص
+            update_text = soup.find('p', string=re.compile(r'更新：|update', re.I))
+            if update_text:
+                date_match = re.search(r'(\d{4}-\d{1,2}-\d{1,2})', update_text.get_text())
+                if date_match:
+                    last_update = parse_relative_date(date_match.group(1))
+        print(f"📌 Last update: {last_update}")
+
+        # 7. استخراج معرف الرواية من الرابط
+        novel_id = None
+        match = re.search(r'/book/(\d+)', url)
+        if match:
+            novel_id = match.group(1)
+        print(f"📌 Novel ID: {novel_id}")
+
+        return {
+            'title': title,
+            'description': description,
+            'cover': cover,
+            'status': status,
+            'category': category,
+            'tags': tags,
+            'sourceUrl': url,
+            'novel_id': novel_id,
+            'lastUpdate': last_update
+        }
+    except Exception as e:
+        print(f"❌ Error 69shuba metadata: {e}")
+        traceback.print_exc()
+        return None
+
+def fetch_chapter_list_shuba(novel_url, novel_id):
+    """
+    استخراج قائمة الفصول من صفحة الفهرس
+    مثال رابط الفهرس: https://www.69shuba.com/book/89407/
+    """
+    chapters = []
+    # بناء رابط الفهرس (بإزالة .htm إذا وجد)
+    if novel_url.endswith('.htm'):
+        index_url = novel_url.replace('.htm', '/')
+    else:
+        index_url = novel_url.rstrip('/') + '/'
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+            'Referer': novel_url,
+            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
+        }
+        
+        print(f"🔍 Fetching chapters from 69shuba index: {index_url}")
+        response = requests.get(index_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch index page: {response.status_code}")
+            return chapters
+
+        response.encoding = 'gbk'
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # البحث عن قائمة الفصول في div.catalog
+        catalog_div = soup.find('div', class_='catalog', id='catalog')
+        if not catalog_div:
+            print("⚠️ Could not find catalog div")
+            return chapters
+
+        # الفصول موجودة في عناصر li داخل ul
+        chapter_items = catalog_div.select('ul li')
+        print(f"📌 Found {len(chapter_items)} chapter items in catalog")
+
+        for item in chapter_items:
+            a_tag = item.find('a')
+            if not a_tag:
+                continue
+
+            href = a_tag.get('href', '')
+            # بناء الرابط الكامل
+            if href.startswith('/'):
+                full_url = 'https://www.69shuba.com' + href
+            else:
+                full_url = urljoin('https://www.69shuba.com', href)
+
+            raw_title = a_tag.get_text(strip=True)
+            
+            # استخراج رقم الفصل من data-num أو من النص
+            number = 0
+            if item.has_attr('data-num'):
+                try:
+                    number = int(item['data-num'])
+                except:
+                    pass
+            
+            if number == 0:
+                # محاولة استخراج الرقم من النص (第N章)
+                num_match = re.search(r'第(\d+)章', raw_title)
+                if num_match:
+                    number = int(num_match.group(1))
+                else:
+                    # محاولة استخراج الرقم من الرابط
+                    num_match = re.search(r'/(\d+)$', href.rstrip('/'))
+                    if num_match:
+                        number = int(num_match.group(1))
+
+            if number > 0:
+                # تنظيف العنوان: إزالة "第N章" من البداية
+                clean_title = re.sub(r'^第\d+章\s*', '', raw_title).strip()
+                chapters.append({
+                    'number': number,
+                    'url': full_url,
+                    'title': clean_title if clean_title else raw_title
+                })
+
+        # ترتيب الفصول حسب الرقم
+        chapters.sort(key=lambda x: x['number'])
+        print(f"✅ Total chapters extracted: {len(chapters)}")
+        return chapters
+
+    except Exception as e:
+        print(f"❌ Error fetching 69shuba chapter list: {e}")
+        traceback.print_exc()
+        return chapters
+
+def scrape_chapter_shuba(chapter_url):
+    """
+    استخراج محتوى الفصل من 69shuba.com
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+            'Referer': 'https://www.69shuba.com/',
+            'Cookie': '_ga=GA1.1.1209756958.1762357227; _ym_uid=1762357229173861739; zh_choose=s; shuba=7513-8573-23744-6020; _ga_04LTEL5PWY=GS2.1.s1772425502$o2$g1$t1772425636$j60$l0$h0',
+        }
+        
+        response = requests.get(chapter_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch chapter: {response.status_code}")
+            return None
+
+        response.encoding = 'gbk'
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # البحث عن محتوى الفصل داخل div.txtnav
+        content_div = soup.find('div', class_='txtnav')
+        if not content_div:
+            print("⚠️ Could not find txtnav div")
+            return None
+
+        # إزالة العناصر غير المرغوب فيها
+        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button', 'div']):
+            # إزالة الإعلانات والعناصر غير النصية
+            if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'contentadv', 'bottom-ad']):
+                bad.decompose()
+            elif bad.get('id') and any(c in bad.get('id').lower() for c in ['ad', 'ads', 'banner']):
+                bad.decompose()
+
+        # استخراج النص
+        # النص يكون عادةً على شكل "&emsp;&emsp;نص الفصل"
+        # نحصل على كل النص وننظفه
+        text = content_div.get_text(separator="\n", strip=True)
+        
+        # إزالة علامات &emsp; واستبدالها بمسافة
+        text = text.replace('&emsp;', ' ').replace('emsp', ' ')
+        
+        # إزالة أسطر المعلومات مثل (本章完)
+        text = re.sub(r'\(本章完\)', '', text)
+        text = re.sub(r'\(本章未完,请翻页\)', '', text)
+        
+        # تنظيف الأسطر المتعددة
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # إزالة النصوص الدعائية
+        text = re.sub(r'请收藏本站：https://www\.69shuba\.com.*?\.com', '', text)
+        
+        return text.strip()
+
+    except Exception as e:
+        print(f"❌ Error scraping 69shuba chapter: {e}")
+        traceback.print_exc()
+        return None
+
+def worker_shuba_list(url, admin_email, metadata):
+    """
+    العامل الرئيسي لجلب جميع فصول 69shuba.com
+    """
+    existing_chapters = check_existing_chapters(metadata['title'])
+    skip_meta = len(existing_chapters) > 0
+
+    # إرسال البيانات الأساسية
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
+
+    novel_id = metadata.get('novel_id')
+    all_chapters = fetch_chapter_list_shuba(url, novel_id)
+    if not all_chapters:
+        print(f"❌ No chapters found for 69shuba: {metadata['title']}")
+        return
+
+    print(f"📋 Processing {len(all_chapters)} chapters from 69shuba.")
+    batch = []
+
+    for chap in all_chapters:
+        if chap['number'] in existing_chapters:
+            print(f"⏭️ Skipping existing chapter {chap['number']}")
+            continue
+
+        print(f"📥 Scraping 69shuba: {metadata['title']} - Ch {chap['number']}...")
+        content = scrape_chapter_shuba(chap['url'])
+        if content:
+            batch.append({
+                'number': chap['number'],
+                'title': chap['title'],
+                'content': content
+            })
+            print(f"✅ Chapter {chap['number']} scraped successfully")
+            if len(batch) >= 5:
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+                print(f"📤 Sent batch of {len(batch)} chapters")
+                batch = []
+                time.sleep(2)  # تأخير بين الدُفعات
+        else:
+            print(f"❌ Failed to scrape chapter {chap['number']}")
+
+    if batch:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+        print(f"📤 Sent final batch of {len(batch)} chapters")
+
+# ==========================================
 # Main Orchestrator
 # ==========================================
 
@@ -1687,6 +2014,13 @@ def trigger_scrape():
             thread.start()
             return jsonify({'message': 'Scraping started (NovelBin).'}), 200
 
+        elif '69shuba.com' in url:
+            meta = fetch_metadata_shuba(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_shuba_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (69 Shuba).'}), 200
+
         else:
             return jsonify({'message': 'Unsupported Domain'}), 400
             
@@ -1729,6 +2063,9 @@ def perform_single_scrape(url, admin_email):
         elif 'novelbin.com' in url:
             meta = fetch_metadata_novelbin(url)
             if meta: worker_novelbin_list(url, admin_email, meta)
+        elif '69shuba.com' in url:
+            meta = fetch_metadata_shuba(url)
+            if meta: worker_shuba_list(url, admin_email, meta)
     except Exception as e:
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
