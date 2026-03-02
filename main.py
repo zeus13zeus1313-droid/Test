@@ -13,7 +13,7 @@ from urllib.parse import urlparse, urljoin
 
 
 # ==========================================
-# إعداداتت التطبيق
+# إعدادات التطبيق
 # ==========================================
 app = Flask(__name__)
 CORS(app)
@@ -1299,24 +1299,50 @@ def worker_fanmtl_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# 🟡 7. NovelBin Logic (NEW)
+# 🟡 7. NovelBin Logic (NEW) - محسّن لجلب البيانات بشكل صحيح
 # ==========================================
 
+def clean_novelbin_title(raw_title):
+    """تنظيف عنوان الرواية من النصوص الإضافية"""
+    if not raw_title:
+        return "Unknown Title"
+    # إزالة أي جزء مثل " - Novel Bin" أو "Read ... Online For Free"
+    cleaned = re.sub(r'\s*[-–|]\s*(?:Novel Bin|Read.*?Online.*?Free).*$', '', raw_title, flags=re.IGNORECASE).strip()
+    # إزالة الأقواس غير المرغوب فيها
+    cleaned = re.sub(r'\s*\(.*?\)\s*$', '', cleaned).strip()
+    return cleaned if cleaned else raw_title
+
 def fetch_metadata_novelbin(url):
-    """استخراج بيانات الرواية من novelbin.com"""
+    """استخراج بيانات الرواية من novelbin.com - نسخة محسنة"""
     try:
         response = requests.get(url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
+            print(f"⚠️ NovelBin metadata fetch failed with status {response.status_code}")
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # العنوان
+        # 1. العنوان - البحث بعدة طرق
+        title = "Unknown Title"
+        
+        # الطريقة الأولى: h1 مع itemprop="name" داخل breadcrumb
         title_tag = soup.find('h1', itemprop='name')
-        if not title_tag:
-            title_tag = soup.find('h1', class_='title')
-        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+        if title_tag:
+            title = title_tag.get_text(strip=True)
+        else:
+            # الطريقة الثانية: h1 بشكل عام
+            title_tag = soup.find('h1')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+            else:
+                # الطريقة الثالثة: meta og:title
+                og_title = soup.find('meta', property='og:title')
+                if og_title:
+                    title = og_title.get('content', '')
+        
+        title = clean_novelbin_title(title)
+        print(f"📌 Extracted title: {title}")
 
-        # الغلاف
+        # 2. الغلاف
         cover = ""
         img_meta = soup.find('meta', property='og:image')
         if img_meta:
@@ -1326,16 +1352,25 @@ def fetch_metadata_novelbin(url):
             if img_tag:
                 cover = img_tag.get('data-src') or img_tag.get('src', '')
         cover = fix_image_url(cover, base_url='https://novelbin.com')
+        print(f"📌 Cover: {cover}")
 
-        # الوصف
+        # 3. الوصف
+        description = ""
         desc_tag = soup.find('meta', property='og:description')
-        description = desc_tag.get('content', '').strip() if desc_tag else ""
+        if desc_tag:
+            description = desc_tag.get('content', '').strip()
         if not description:
             desc_div = soup.find('div', class_='desc-text')
             if desc_div:
                 description = desc_div.get_text(separator="\n\n", strip=True)
+        if not description:
+            # محاولة أخرى: meta name="description"
+            desc_meta = soup.find('meta', attrs={'name': 'description'})
+            if desc_meta:
+                description = desc_meta.get('content', '').strip()
+        print(f"📌 Description length: {len(description)}")
 
-        # الحالة (مستمرة / مكتملة)
+        # 4. الحالة
         status = "مستمرة"
         status_meta = soup.find('meta', property='og:novel:status')
         if status_meta:
@@ -1343,12 +1378,13 @@ def fetch_metadata_novelbin(url):
             if 'completed' in st:
                 status = "مكتملة"
         if status == "مستمرة":
-            # fallback: من النص الموجود
+            # fallback: من النص أو الرابط
             status_elem = soup.select_one('.info-meta li a[href*="completed"]')
             if status_elem:
                 status = "مكتملة"
+        print(f"📌 Status: {status}")
 
-        # التصنيفات
+        # 5. التصنيفات
         tags = []
         genre_meta = soup.find('meta', property='og:novel:genre')
         if genre_meta:
@@ -1360,8 +1396,9 @@ def fetch_metadata_novelbin(url):
                 tag_links = tag_container.find_all('a')
                 tags = [a.get_text(strip=True) for a in tag_links]
         category = tags[0] if tags else "عام"
+        print(f"📌 Tags: {tags}")
 
-        # آخر تحديث
+        # 6. آخر تحديث
         last_update = None
         update_meta = soup.find('meta', property='og:novel:update_time')
         if update_meta:
@@ -1370,6 +1407,7 @@ def fetch_metadata_novelbin(url):
             time_elem = soup.select_one('.item-time')
             if time_elem:
                 last_update = parse_relative_date(time_elem.get_text(strip=True))
+        print(f"📌 Last update: {last_update}")
 
         return {
             'title': title,
@@ -1382,15 +1420,17 @@ def fetch_metadata_novelbin(url):
             'lastUpdate': last_update
         }
     except Exception as e:
-        print(f"Error NovelBin metadata: {e}")
+        print(f"❌ Error NovelBin metadata: {e}")
+        traceback.print_exc()
         return None
 
 def fetch_chapter_list_novelbin(novel_url):
-    """استخراج قائمة الفصول من صفحة الرواية الرئيسية في novelbin.com"""
+    """استخراج قائمة الفصول من صفحة الرواية الرئيسية في novelbin.com - نسخة محسنة"""
     chapters = []
     try:
         response = requests.get(novel_url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
+            print(f"⚠️ NovelBin chapter list fetch failed with status {response.status_code}")
             return chapters
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -1400,6 +1440,8 @@ def fetch_chapter_list_novelbin(novel_url):
         if not chapter_links:
             # محاولة بديلة: البحث عن أي رابط يحتوي على /chapter- في الصفحة
             chapter_links = soup.find_all('a', href=re.compile(r'/chapter-\d+'))
+
+        print(f"📌 Found {len(chapter_links)} chapter links in HTML")
 
         for a in chapter_links:
             href = a.get('href', '')
@@ -1423,26 +1465,30 @@ def fetch_chapter_list_novelbin(novel_url):
         # إزالة التكرار وفرز حسب الرقم
         unique = {c['number']: c for c in chapters}.values()
         chapters = sorted(unique, key=lambda x: x['number'])
+        print(f"📌 Total unique chapters: {len(chapters)}")
         return chapters
     except Exception as e:
-        print(f"Error fetching NovelBin chapter list: {e}")
+        print(f"❌ Error fetching NovelBin chapter list: {e}")
+        traceback.print_exc()
         return chapters
 
 def scrape_chapter_novelbin(chapter_url):
-    """استخراج محتوى الفصل من novelbin.com"""
+    """استخراج محتوى الفصل من novelbin.com - نسخة محسنة"""
     try:
         response = requests.get(chapter_url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
+            print(f"⚠️ NovelBin chapter scrape failed with status {response.status_code}")
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
 
         # محتوى الفصل داخل div#chr-content
         content_div = soup.find('div', id='chr-content')
         if not content_div:
+            print("⚠️ Could not find #chr-content")
             return None
 
         # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص زائدة)
-        for bad in content_div.find_all(['script', 'style', 'ins', 'div', 'iframe', 'button']):
+        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button']):
             # نحتفظ بالنص، فقط نزيل العناصر التي قد تحوي إعلانات
             if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'pf-']):
                 bad.decompose()
@@ -1452,6 +1498,10 @@ def scrape_chapter_novelbin(chapter_url):
                 # بدلاً من decompose، نستبدل بمسافة للحفاظ على النص المحيط
                 bad.replace_with(' ')
 
+        # إزالة عناصر div التي تحوي إعلانات
+        for div in content_div.find_all('div', class_=re.compile(r'(ad|banner|popup|pf-)', re.I)):
+            div.decompose()
+
         # الحصول على النص
         text = content_div.get_text(separator="\n\n", strip=True)
         # تنظيف الأسطر الفارغة المتعددة
@@ -1459,9 +1509,11 @@ def scrape_chapter_novelbin(chapter_url):
         # إزالة بعض العبارات الدعائية الشائعة
         text = re.sub(r'Read .*? at .*?\.com', '', text, flags=re.IGNORECASE)
         text = re.sub(r'If you find any errors .*? please let us know', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'Support .*? by reading .*? online', '', text, flags=re.IGNORECASE)
         return text.strip()
     except Exception as e:
-        print(f"Error scraping NovelBin chapter: {e}")
+        print(f"❌ Error scraping NovelBin chapter: {e}")
+        traceback.print_exc()
         return None
 
 def worker_novelbin_list(url, admin_email, metadata):
@@ -1474,17 +1526,18 @@ def worker_novelbin_list(url, admin_email, metadata):
 
     all_chapters = fetch_chapter_list_novelbin(url)
     if not all_chapters:
-        print(f"No chapters found for NovelBin: {metadata['title']}")
+        print(f"❌ No chapters found for NovelBin: {metadata['title']}")
         return
 
-    print(f"Processing {len(all_chapters)} chapters from NovelBin.")
+    print(f"📋 Processing {len(all_chapters)} chapters from NovelBin.")
     batch = []
 
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
+            print(f"⏭️ Skipping existing chapter {chap['number']}")
             continue
 
-        print(f"Scraping NovelBin: {metadata['title']} - Ch {chap['number']}...")
+        print(f"📥 Scraping NovelBin: {metadata['title']} - Ch {chap['number']}...")
         content = scrape_chapter_novelbin(chap['url'])
         if content:
             batch.append({
@@ -1492,13 +1545,16 @@ def worker_novelbin_list(url, admin_email, metadata):
                 'title': chap['title'],
                 'content': content
             })
+            print(f"✅ Chapter {chap['number']} scraped successfully")
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+                print(f"📤 Sent batch of {len(batch)} chapters")
                 batch = []
                 time.sleep(1.5)
 
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+        print(f"📤 Sent final batch of {len(batch)} chapters")
 
 # ==========================================
 # Main Orchestrator
