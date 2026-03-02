@@ -1299,7 +1299,7 @@ def worker_fanmtl_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# 🟡 7. NovelBin Logic (NEW) - محسّن لجلب جميع الفصول عبر AJAX
+# 🟡 7. NovelBin Logic (مُحدّث بالكامل لجلب جميع الفصول)
 # ==========================================
 
 def clean_novelbin_title(raw_title):
@@ -1312,8 +1312,16 @@ def clean_novelbin_title(raw_title):
     cleaned = re.sub(r'\s*\(.*?\)\s*$', '', cleaned).strip()
     return cleaned if cleaned else raw_title
 
+def extract_novel_id_from_url(url):
+    """استخراج معرف الرواية (slug) من الرابط"""
+    # مثال: https://novelbin.com/b/top-tier-providence-secretly-cultivate-for-a-thousand-years
+    match = re.search(r'/b/([^/]+)', url)
+    if match:
+        return match.group(1)
+    return None
+
 def fetch_metadata_novelbin(url):
-    """استخراج بيانات الرواية من novelbin.com - نسخة محسنة"""
+    """استخراج بيانات الرواية من novelbin.com - نسخة محسّنة"""
     try:
         response = requests.get(url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
@@ -1409,6 +1417,10 @@ def fetch_metadata_novelbin(url):
                 last_update = parse_relative_date(time_elem.get_text(strip=True))
         print(f"📌 Last update: {last_update}")
 
+        # 7. استخراج معرف الرواية (novel_id) من الرابط
+        novel_id = extract_novel_id_from_url(url)
+        print(f"📌 Novel ID: {novel_id}")
+
         return {
             'title': title,
             'description': description,
@@ -1417,6 +1429,7 @@ def fetch_metadata_novelbin(url):
             'category': category,
             'tags': tags,
             'sourceUrl': url,
+            'novel_id': novel_id,
             'lastUpdate': last_update
         }
     except Exception as e:
@@ -1424,50 +1437,33 @@ def fetch_metadata_novelbin(url):
         traceback.print_exc()
         return None
 
-def fetch_chapter_list_novelbin(novel_url):
-    """استخراج قائمة الفصول من novelbin.com عبر محاكاة طلب AJAX"""
+def fetch_chapter_list_novelbin(novel_url, novel_id):
+    """استخراج جميع الفصول عبر endpoint /ajax/chapter-archive?novelId=..."""
     chapters = []
-    base_url = get_base_url(novel_url)
-    use_cookies = 'novelbin.com' in novel_url
+    if not novel_id:
+        novel_id = extract_novel_id_from_url(novel_url)
+    if not novel_id:
+        print("⚠️ Could not extract novel_id")
+        return chapters
 
-    # محاولة جلب الفصول عبر endpoint /ajax/chapters/ (كما في Madara)
-    ajax_endpoint = f"{novel_url.rstrip('/')}/ajax/chapters/"
+    # بناء رابط الـ AJAX الصحيح
+    ajax_url = f"https://novelbin.com/ajax/chapter-archive?novelId={novel_id}"
     try:
-        headers = get_headers(use_cookies=use_cookies)
+        headers = get_headers(referer=novel_url)
         headers['X-Requested-With'] = 'XMLHttpRequest'
-        res = requests.post(ajax_endpoint, headers=headers, timeout=20)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.content, 'html.parser')
-            chapter_links = soup.select('ul.list-chapter li a')
-            if chapter_links:
-                for a in chapter_links:
-                    href = a.get('href', '')
-                    full_url = href if href.startswith('http') else urljoin(base_url, href)
-                    num_match = re.search(r'/chapter-(\d+)', href)
-                    number = int(num_match.group(1)) if num_match else 0
-                    title_span = a.find('span', class_='nchr-text')
-                    raw_title = title_span.get_text(strip=True) if title_span else a.get_text(strip=True)
-                    if number > 0:
-                        chapters.append({'number': number, 'url': full_url, 'title': raw_title})
-                print(f"✅ Chapters fetched via /ajax/chapters/ ({len(chapters)})")
-                return sorted(chapters, key=lambda x: x['number'])
-    except Exception as e:
-        print(f"⚠️ AJAX endpoint failed: {e}")
-
-    # إذا فشل AJAX، نحاول جلب الصفحة الرئيسية واستخراج الفصول الموجودة في HTML
-    try:
-        response = requests.get(novel_url, headers=get_headers(), timeout=15)
+        response = requests.get(ajax_url, headers=headers, timeout=20)
         if response.status_code != 200:
+            print(f"⚠️ AJAX request failed with status {response.status_code}")
             return chapters
-        soup = BeautifulSoup(response.content, 'html.parser')
 
-        # الفصول موجودة في div#tab-chapters داخل ul.list-chapter
-        chapter_links = soup.select('#tab-chapters ul.list-chapter li a')
+        soup = BeautifulSoup(response.content, 'html.parser')
+        # الفصول موجودة في ul.list-chapter داخل HTML المُرجَع
+        chapter_links = soup.select('ul.list-chapter li a')
         if not chapter_links:
             # محاولة بديلة: البحث عن أي رابط يحتوي على /chapter- في الصفحة
             chapter_links = soup.find_all('a', href=re.compile(r'/chapter-\d+'))
 
-        print(f"📌 Found {len(chapter_links)} chapter links in HTML")
+        print(f"📌 Found {len(chapter_links)} chapter links in AJAX response")
 
         for a in chapter_links:
             href = a.get('href', '')
@@ -1482,10 +1478,10 @@ def fetch_chapter_list_novelbin(novel_url):
         # إزالة التكرار وفرز حسب الرقم
         unique = {c['number']: c for c in chapters}.values()
         chapters = sorted(unique, key=lambda x: x['number'])
-        print(f"📌 Total unique chapters from HTML: {len(chapters)}")
+        print(f"📌 Total unique chapters from AJAX: {len(chapters)}")
         return chapters
     except Exception as e:
-        print(f"❌ Error fetching NovelBin chapter list: {e}")
+        print(f"❌ Error fetching NovelBin chapter list via AJAX: {e}")
         traceback.print_exc()
         return chapters
 
@@ -1541,7 +1537,9 @@ def worker_novelbin_list(url, admin_email, metadata):
     # إرسال البيانات الأساسية
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
-    all_chapters = fetch_chapter_list_novelbin(url)
+    # استخدام novel_id من metadata (الموجود الآن)
+    novel_id = metadata.get('novel_id')
+    all_chapters = fetch_chapter_list_novelbin(url, novel_id)
     if not all_chapters:
         print(f"❌ No chapters found for NovelBin: {metadata['title']}")
         return
