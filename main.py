@@ -1858,7 +1858,6 @@ def scrape_chapter_shuba(chapter_url):
         print(f"❌ Error scraping 69shuba chapter: {e}")
         traceback.print_exc()
         return None
-        
 
 def worker_shuba_list(url, admin_email, metadata):
     """
