@@ -1588,7 +1588,7 @@ def worker_novelbin_list(url, admin_email, metadata):
         print(f"📤 Sent final batch of {len(batch)} chapters")
 
 # ==========================================
-# 🟤 8. NovelFull (novelfull.net) Logic
+# 🟤 8. NovelFull (novelfull.net) Logic (مُحدّث)
 # ==========================================
 
 def fetch_metadata_novelfull(url):
@@ -1598,36 +1598,46 @@ def fetch_metadata_novelfull(url):
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Title from meta og:title
-        title_tag = soup.find("meta", property="og:title")
-        title = title_tag["content"] if title_tag else "Unknown Title"
-        # Clean if necessary (remove " - NovelFull" etc)
-        title = re.sub(r'\s*[-–|]\s*(?:NovelFull|Read.*?online).*$', '', title, flags=re.IGNORECASE).strip()
+        # Title: محاولة من h1 أولاً، ثم من og:title
+        title_tag = soup.find('h1')
+        title = title_tag.get_text(strip=True) if title_tag else None
+        
+        if not title:
+            og_title = soup.find("meta", property="og:title")
+            if og_title:
+                title = og_title.get("content")
+        
+        if title:
+            # تنظيف العنوان من إضافات الموقع
+            title = re.sub(r'\s*[-–|]\s*(?:NovelFull|Read.*?online).*$', '', title, flags=re.IGNORECASE).strip()
+        else:
+            title = "Unknown Title"
         
         # Cover
         cover = ""
         img_tag = soup.select_one('.book img')
         if img_tag:
             cover = img_tag.get('src')
-        # Use og:image as fallback
         if not cover:
             og_img = soup.find("meta", property="og:image")
             if og_img:
-                cover = og_img["content"]
+                cover = og_img.get("content")
         cover = fix_image_url(cover, base_url='https://novelfull.net')
         
-        # Description
-        desc_div = soup.select_one('.desc-text')
+        # Description: من .desc-text أو meta description
         description = ""
+        desc_div = soup.select_one('.desc-text')
         if desc_div:
-            # get all paragraphs inside
+            # جمع كل الفقرات
             paras = desc_div.find_all('p')
-            description = "\n\n".join([p.get_text(strip=True) for p in paras if p.get_text(strip=True)])
+            if paras:
+                description = "\n\n".join([p.get_text(strip=True) for p in paras if p.get_text(strip=True)])
+            else:
+                description = desc_div.get_text(strip=True)
         else:
-            # fallback to meta description
             desc_meta = soup.find("meta", attrs={"name": "description"})
             if desc_meta:
-                description = desc_meta["content"]
+                description = desc_meta.get("content")
         
         # Status
         status = "مستمرة"
@@ -1644,7 +1654,7 @@ def fetch_metadata_novelfull(url):
             tags.append(link.get_text(strip=True))
         category = tags[0] if tags else "عام"
         
-        # Last Update - try to find from latest chapter maybe, but leave None for now
+        # Last Update - نتركها None حالياً
         last_update = None
         
         return {
@@ -1666,12 +1676,8 @@ def fetch_chapter_list_novelfull(novel_url):
     """جلب جميع الفصول من novelfull.net مع التنقل بين الصفحات"""
     chapters = []
     base_url = 'https://novelfull.net'
-    # التأكد من أن الرابط الرئيسي للرواية (بدون page parameter)
-    # الرابط قد يكون مثل https://novelfull.net/infinite-mana-in-the-apocalypse.html
-    # لكن قد يكون مع page، لذا نأخذ الجزء الأساسي
     parsed = urlparse(novel_url)
     path = parsed.path
-    # إزالة أي query parameters
     base_novel_url = f"{parsed.scheme}://{parsed.netloc}{path}"
     
     page = 1
@@ -1688,11 +1694,8 @@ def fetch_chapter_list_novelfull(novel_url):
                 break
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # الفصول موجودة في ul.list-chapter داخل div#list-chapter
-            # قد يكون هناك عمودين (كل عمود فيه ul). نبحث عن جميع ul.list-chapter
             chapter_lists = soup.select('#list-chapter ul.list-chapter')
             if not chapter_lists:
-                # إذا لم نجد، ربما لا توجد فصول في هذه الصفحة
                 break
             
             found_in_page = 0
@@ -1703,27 +1706,22 @@ def fetch_chapter_list_novelfull(novel_url):
                     if not a:
                         continue
                     href = a.get('href')
-                    # href قد يكون نسبي مثل '/infinite-mana-in-the-apocalypse/chapter-1-awaken.html'
                     if href.startswith('/'):
                         full_url = base_url + href
                     else:
                         full_url = href
                     
-                    # استخراج النص داخل span.chapter-text إن وجد، وإلا استخدم نص الرابط
                     span = a.find('span', class_='chapter-text')
                     if span:
                         raw_title = span.get_text(strip=True)
                     else:
                         raw_title = a.get_text(strip=True)
                     
-                    # استخراج رقم الفصل من الرابط
-                    # مثال: /chapter-123-some-title
                     num_match = re.search(r'/chapter-(\d+)', href, re.IGNORECASE)
                     number = 0
                     if num_match:
                         number = int(num_match.group(1))
                     else:
-                        # محاولة من العنوان
                         num_match = re.search(r'Chapter\s+(\d+)', raw_title, re.IGNORECASE)
                         if num_match:
                             number = int(num_match.group(1))
@@ -1737,25 +1735,21 @@ def fetch_chapter_list_novelfull(novel_url):
                         found_in_page += 1
             
             if found_in_page == 0:
-                # لا فصول في هذه الصفحة، ربما انتهينا
                 break
             
-            # التحقق من وجود صفحة تالية
             next_link = soup.select_one('ul.pagination li.next a')
             if not next_link:
-                # قد يكون هناك زر "Next" نصي أو رمز >
                 next_link = soup.select_one('ul.pagination li a[rel="next"]')
             
             if next_link:
                 page += 1
-                time.sleep(0.5)  # تأخير بسيط
+                time.sleep(0.5)
             else:
                 break
         except Exception as e:
             print(f"Error fetching page {page}: {e}")
             break
     
-    # إزالة التكرار (قد يحدث إذا تكررت الفصول)
     unique = {c['number']: c for c in chapters}.values()
     chapters = sorted(unique, key=lambda x: x['number'])
     print(f"✅ Total chapters found for NovelFull: {len(chapters)}")
@@ -1768,25 +1762,35 @@ def scrape_chapter_novelfull(chapter_url):
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # محتوى الفصل داخل div#chapter-content
+        # المحاولة الأولى: البحث عن div#chapter-content (الأكثر شيوعاً)
         content_div = soup.find('div', id='chapter-content')
+        
+        # إذا لم نجد، نحاول البحث عن div.chapter-c (كما في بعض الروايات)
         if not content_div:
+            content_div = soup.find('div', class_='chapter-c')
+        
+        # إذا لم نجد، نحاول البحث عن أي div يحوي نصوص الفصل
+        if not content_div:
+            # قد يكون المحتوى داخل div.entry-content أو div.post-content
+            content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
+        
+        if not content_div:
+            print(f"⚠️ Could not find content div for {chapter_url}")
             return None
         
         # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص إضافية)
-        # نقوم بإزالة بعض divs التي تحمل إعلانات مثل <div align="center"> وغيرها
-        for unwanted in content_div.find_all(['div', 'script', 'ins', 'iframe', 'button']):
+        for unwanted in content_div.find_all(['div', 'script', 'ins', 'iframe', 'button', 'style']):
             # نتحقق من وجود class أو id يشير إلى إعلان
             classes = unwanted.get('class', [])
             ids = unwanted.get('id', '')
-            if any(ad in str(classes).lower() for ad in ['ad', 'ads', 'banner', 'pub', 'popup']) or \
+            if any(ad in str(classes).lower() for ad in ['ad', 'ads', 'banner', 'pub', 'popup', 'code-block']) or \
                any(ad in str(ids).lower() for ad in ['ad', 'ads', 'banner', 'pub', 'popup']):
                 unwanted.decompose()
             elif unwanted.name == 'div' and unwanted.get('align') == 'center':
                 # غالبًا ما تكون هذه الإعلانات
                 unwanted.decompose()
         
-        # استخراج النص من الفقرات
+        # استخراج النص من الفقرات إن وجدت
         paragraphs = content_div.find_all('p')
         if paragraphs:
             text = "\n\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
