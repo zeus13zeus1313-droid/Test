@@ -1299,7 +1299,7 @@ def worker_fanmtl_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# 🟡 7. NovelBin Logic (NEW) - محسّن لجلب البيانات بشكل صحيح
+# 🟡 7. NovelBin Logic (NEW) - محسّن لجلب جميع الفصول عبر AJAX
 # ==========================================
 
 def clean_novelbin_title(raw_title):
@@ -1425,17 +1425,43 @@ def fetch_metadata_novelbin(url):
         return None
 
 def fetch_chapter_list_novelbin(novel_url):
-    """استخراج قائمة الفصول من صفحة الرواية الرئيسية في novelbin.com - نسخة محسنة"""
+    """استخراج قائمة الفصول من novelbin.com عبر محاكاة طلب AJAX"""
     chapters = []
+    base_url = get_base_url(novel_url)
+    use_cookies = 'novelbin.com' in novel_url
+
+    # محاولة جلب الفصول عبر endpoint /ajax/chapters/ (كما في Madara)
+    ajax_endpoint = f"{novel_url.rstrip('/')}/ajax/chapters/"
+    try:
+        headers = get_headers(use_cookies=use_cookies)
+        headers['X-Requested-With'] = 'XMLHttpRequest'
+        res = requests.post(ajax_endpoint, headers=headers, timeout=20)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.content, 'html.parser')
+            chapter_links = soup.select('ul.list-chapter li a')
+            if chapter_links:
+                for a in chapter_links:
+                    href = a.get('href', '')
+                    full_url = href if href.startswith('http') else urljoin(base_url, href)
+                    num_match = re.search(r'/chapter-(\d+)', href)
+                    number = int(num_match.group(1)) if num_match else 0
+                    title_span = a.find('span', class_='nchr-text')
+                    raw_title = title_span.get_text(strip=True) if title_span else a.get_text(strip=True)
+                    if number > 0:
+                        chapters.append({'number': number, 'url': full_url, 'title': raw_title})
+                print(f"✅ Chapters fetched via /ajax/chapters/ ({len(chapters)})")
+                return sorted(chapters, key=lambda x: x['number'])
+    except Exception as e:
+        print(f"⚠️ AJAX endpoint failed: {e}")
+
+    # إذا فشل AJAX، نحاول جلب الصفحة الرئيسية واستخراج الفصول الموجودة في HTML
     try:
         response = requests.get(novel_url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
-            print(f"⚠️ NovelBin chapter list fetch failed with status {response.status_code}")
             return chapters
         soup = BeautifulSoup(response.content, 'html.parser')
 
         # الفصول موجودة في div#tab-chapters داخل ul.list-chapter
-        # قد تكون موزعة على عدة أعمدة، نجمع كل الروابط
         chapter_links = soup.select('#tab-chapters ul.list-chapter li a')
         if not chapter_links:
             # محاولة بديلة: البحث عن أي رابط يحتوي على /chapter- في الصفحة
@@ -1445,27 +1471,18 @@ def fetch_chapter_list_novelbin(novel_url):
 
         for a in chapter_links:
             href = a.get('href', '')
-            # التأكد من الرابط الكامل
             full_url = href if href.startswith('http') else urljoin('https://novelbin.com', href)
-            # استخراج رقم الفصل من الرابط
             num_match = re.search(r'/chapter-(\d+)', href)
             number = int(num_match.group(1)) if num_match else 0
-
-            # عنوان الفصل (نظيف)
             title_span = a.find('span', class_='nchr-text')
             raw_title = title_span.get_text(strip=True) if title_span else a.get_text(strip=True)
-
             if number > 0:
-                chapters.append({
-                    'number': number,
-                    'url': full_url,
-                    'title': raw_title
-                })
+                chapters.append({'number': number, 'url': full_url, 'title': raw_title})
 
         # إزالة التكرار وفرز حسب الرقم
         unique = {c['number']: c for c in chapters}.values()
         chapters = sorted(unique, key=lambda x: x['number'])
-        print(f"📌 Total unique chapters: {len(chapters)}")
+        print(f"📌 Total unique chapters from HTML: {len(chapters)}")
         return chapters
     except Exception as e:
         print(f"❌ Error fetching NovelBin chapter list: {e}")
