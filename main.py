@@ -10,6 +10,9 @@ from flask_cors import CORS
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
+from functools import lru_cache
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 # ==========================================
@@ -27,7 +30,6 @@ NODE_BACKEND_URL = os.environ.get('NODE_BACKEND_URL', 'https://c-production-fba8
 # ==========================================
 # 🍪 إعدادات الكوكيز (تجاوز حماية تسجيل الدخول)
 # ==========================================
-# تم تحديث الكوكيز بناءً على طلبك لمركز الروايات
 MARKAZ_COOKIES = 'wordpress_sec_198f6e9e82ba200a53325105f201ddc5=mikey%7C1771590380%7CKJphcZkhBFCpXyLUDrDcGPi9XmNOC47IPCSEHAPyfXS%7C5e8e596c5389b65f91a30668be6f16c7134b98b3ae55a007ed360594dd035527; cf_clearance=qYXkJIaj1IiaBKgi561_IQ.9oWgJ3fx10itfVR20lXY-1765278736-1.2.1.1-soYoRwUhDSq_.2cCoaJ22MPadmCmaQ0cW3AkfA1L97BJIbxQQro5hvpmuJxhQaT57TxfEW10l9gQYsmy5QgrwLsiWHScUWVvqYzZufRRYs9LIDPAhyxiOnL2Byevi12fb8iAZWttVNlqYWeKjH06tTp8bNhPx4dsmudPpIh0qzijEZhRk8lK6nWip1SeDFO2Of35W2rBKDEtjidGFyIj1RU3B7Xt.4CVoQbE9pGFaS8gFTMOp.0qmMMiz1UmHoFc; wpmanga-body-contrast=light; wpmanga-reading-history=W3siaWQiOjEyODE3LCJjIjoiMzEzMDgiLCJwIjoxLCJpIjoiIiwidCI6MTc2ODEwMTY3MH1d; sbjs_migrations=1418474375998%3D1; sbjs_current_add=fd%3D2026-02-06%2012%3A25%3A57%7C%7C%7Cep%3Dhttps%3A%2F%2Fmarkazriwayat.com%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Fwww.bing.com%2F; sbjs_first_add=fd%3D2026-02-06%2012%3A25%3A57%7C%7C%7Cep%3Dhttps%3A%2F%2Fmarkazriwayat.com%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Fwww.bing.com%2F; sbjs_current=typ%3Dreferral%7C%7C%7Csrc%3Dbing.com%7C%7C%7Cmdm%3Dreferral%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%2F%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29; sbjs_first=typ%3Dreferral%7C%7C%7Csrc%3Dbing.com%7C%7C%7Cmdm%3Dreferral%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%2F%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29; sbjs_udata=vst%3D1%7C%7C%7Cuip%3D%28none%29%7C%7C%7Cuag%3DMozilla%2F5.0%20%28Windows%20NT%206.2%3B%20Win64%3B%20x64%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F109.0.0.0%20Safari%2F537.36%20Edg%2F109.0.1518.140; wordpress_test_cookie=WP%20Cookie%20check; _lscache_vary=8d8d3777c370b0211addc5b0a9411cd9; wordpress_logged_in_198f6e9e82ba200a53325105f201ddc5=mikey%7C1771590380%7CKJphcZkhBFCpXyLUDrDcGPi9XmNOC47IPCSEHAPyfXS%7Cb7d906dce3f0b160d5c2f585bfec331fe7d0cc3e4640a74945cc619df837e5c9; sbjs_session=pgs%3D2%7C%7C%7Ccpg%3Dhttps%3A%2F%2Fmarkazriwayat.com%2F%3Fnsl_bypass_cache%3D74d71305203b9ce18787813c87e33f8c'
 
 # ==========================================
@@ -35,7 +37,7 @@ MARKAZ_COOKIES = 'wordpress_sec_198f6e9e82ba200a53325105f201ddc5=mikey%7C1771590
 # ==========================================
 SCHEDULER_CONFIG = {
     'active': False,
-    'interval_seconds': 86400, # Default 24h
+    'interval_seconds': 86400,
     'next_run': 0,
     'last_run': 0,
     'status': 'idle',
@@ -43,29 +45,152 @@ SCHEDULER_CONFIG = {
 }
 
 # ==========================================
-# أدوات السحب المشتركة (Shared Scraper Tools)
+# تحسينات الأداء: Session pool, cache, retry
 # ==========================================
 
+# إنشاء جلسة عامة مع إعادة محاولة تلقائية
+def create_session(retries=3, backoff_factor=0.5):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+# جلسة واحدة للاستخدام مع جميع الطلبات (مع تحديث الهيدرات قبل كل طلب)
+_global_session = create_session()
+
+# دالة مساعدة للحصول على الهيدرات وتطبيقها على الجلسة
 def get_headers(referer=None, use_cookies=False):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate',
     }
     if referer:
         headers['Referer'] = referer
-    
     if use_cookies and MARKAZ_COOKIES and MARKAZ_COOKIES != 'ضع_هنا_الكوكيز_الخاصة_بك_كاملة':
         headers['Cookie'] = MARKAZ_COOKIES
-        
     return headers
+
+# دالة طلب موحدة مع إعادة محاولة مخصصة
+def request_with_retry(method, url, **kwargs):
+    # إعداد الهيدرات الافتراضية إذا لم تكن موجودة
+    if 'headers' not in kwargs:
+        kwargs['headers'] = get_headers()
+    # استخدام الجلسة العالمية
+    response = _global_session.request(method, url, **kwargs)
+    return response
+
+# تخزين مؤقت لنتائج check_existing_chapters
+_existing_chapters_cache = {}
+_CACHE_TTL = 3600  # ساعة واحدة
+
+def check_existing_chapters(title):
+    """التحقق من الفصول الموجودة في الباك إند مع التخزين المؤقت"""
+    now = time.time()
+    if title in _existing_chapters_cache:
+        cached_time, cached_data = _existing_chapters_cache[title]
+        if now - cached_time < _CACHE_TTL:
+            return cached_data
+    try:
+        endpoint = f"{NODE_BACKEND_URL}/api/scraper/check-chapters"
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': API_SECRET,
+            'x-api-secret': API_SECRET,
+            'Accept-Encoding': 'gzip, deflate'
+        }
+        response = requests.post(endpoint, json={'title': title}, headers=headers, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('exists'):
+                chapters = data['chapters']
+            else:
+                chapters = []
+        else:
+            chapters = []
+        _existing_chapters_cache[title] = (now, chapters)
+        return chapters
+    except Exception as e:
+        print(f"❌ Error checking existence: {e}")
+        return []
+
+# تحسين دالة parse_relative_date باستخدام LRU cache وتبسيط regex
+@lru_cache(maxsize=512)
+def parse_relative_date(date_str):
+    """تحويل التواريخ النسبية (منذ 5 ساعات، يومين ago) إلى تاريخ حقيقي"""
+    try:
+        if not date_str:
+            return None
+        
+        now = datetime.now()
+        text = str(date_str).lower().strip()
+        
+        # معالجة النصوص العربية الخاصة
+        if 'يومين' in text:
+            return (now - timedelta(days=2)).isoformat()
+        if 'ساعتين' in text:
+            return (now - timedelta(hours=2)).isoformat()
+        if 'دقيقتين' in text:
+            return (now - timedelta(minutes=2)).isoformat()
+        if 'أمس' in text or 'امس' in text:
+            return (now - timedelta(days=1)).isoformat()
+        
+        # إزالة كلمات زائدة
+        text = re.sub(r'updated|ago|منذ', '', text).strip()
+        
+        # regex محسن
+        match = re.search(r'(\d+)\s*(ثانية?|ثواني?|دقيقة?|دقائق?|ساعة?|ساعات?|يوم?|أيام?|ايام?|أسبوع?|اسبوع?|أسابيع?|اسابيع?|شهر?|أشهر?|اشهر?|سنة?|سنوات?|sec|min|hour|day|week|month|year)', text)
+        
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            
+            if 'sec' in unit or 'ثان' in unit:
+                delta = timedelta(seconds=amount)
+            elif 'min' in unit or 'دقيق' in unit:
+                delta = timedelta(minutes=amount)
+            elif 'hour' in unit or 'ساع' in unit:
+                delta = timedelta(hours=amount)
+            elif 'day' in unit or 'يوم' in unit or 'أيام' in unit or 'ايام' in unit:
+                delta = timedelta(days=amount)
+            elif 'week' in unit or 'أسبوع' in unit or 'اسبوع' in unit or 'أسابيع' in unit or 'اسابيع' in unit:
+                delta = timedelta(weeks=amount)
+            elif 'month' in unit or 'شهر' in unit or 'أشهر' in unit or 'اشهر' in unit:
+                delta = timedelta(days=amount * 30)
+            elif 'year' in unit or 'سنة' in unit or 'سنوات' in unit:
+                delta = timedelta(days=amount * 365)
+            else:
+                delta = timedelta(seconds=0)
+            
+            return (now - delta).isoformat()
+        
+        # محاولة تنسيقات التاريخ الثابت
+        for fmt in ['%B %d, %Y', '%Y/%m/%d', '%d/%m/%Y', '%Y-%m-%d']:
+            try:
+                dt = datetime.strptime(text, fmt)
+                return dt.isoformat()
+            except:
+                continue
+        
+        return None
+    except:
+        return None
 
 def fix_image_url(url, base_url='https://api.rewayat.club'):
     if not url: return ""
     if url.startswith('//'):
         return 'https:' + url
     elif url.startswith('/'):
-        # Fix for absolute paths without domain
         if 'novelfire.net' in base_url:
             return 'https://novelfire.net' + url
         elif 'wuxiabox.com' in base_url or 'wuxiaspot.com' in base_url:
@@ -79,100 +204,21 @@ def fix_image_url(url, base_url='https://api.rewayat.club'):
         return base_url + '/' + url
     return url
 
-def parse_relative_date(date_str):
-    """تحويل التواريخ النسبية (منذ 5 ساعات، يومين ago) إلى تاريخ حقيقي"""
-    try:
-        if not date_str: return None
-        
-        now = datetime.now()
-        text = str(date_str).lower().strip()
-        
-        # معالجة النصوص العربية الخاصة (يومين، ساعتين، إلخ)
-        if 'يومين' in text:
-            return (now - timedelta(days=2)).isoformat()
-        if 'ساعتين' in text:
-            return (now - timedelta(hours=2)).isoformat()
-        if 'دقيقتين' in text:
-            return (now - timedelta(minutes=2)).isoformat()
-        if 'أمس' in text or 'امس' in text:
-            return (now - timedelta(days=1)).isoformat()
-        
-        # إزالة كلمات زائدة
-        text = text.replace('updated', '').replace('ago', '').replace('منذ', '').strip()
-        
-        # استخراج الرقم والوحدة (عربي وإنجليزي)
-        # Match number followed by optional whitespace and unit
-        match = re.search(r'(\d+)\s*(sec|min|hour|day|week|month|year|ثانية|ثواني|دقيقة|دقائق|ساعة|ساعات|يوم|أيام|ايام|أسبوع|اسبوع|أسابيع|اسابيع|شهر|أشهر|اشهر|سنة|سنوات)', text)
-        
-        if match:
-            amount = int(match.group(1))
-            unit = match.group(2)
-            
-            delta = timedelta(seconds=0)
-            
-            # English Units
-            if 'sec' in unit: delta = timedelta(seconds=amount)
-            elif 'min' in unit: delta = timedelta(minutes=amount)
-            elif 'hour' in unit: delta = timedelta(hours=amount)
-            elif 'day' in unit: delta = timedelta(days=amount)
-            elif 'week' in unit: delta = timedelta(weeks=amount)
-            elif 'month' in unit: delta = timedelta(days=amount * 30)
-            elif 'year' in unit: delta = timedelta(days=amount * 365)
-            
-            # Arabic Units
-            elif 'ثان' in unit: delta = timedelta(seconds=amount)
-            elif 'دقيق' in unit: delta = timedelta(minutes=amount)
-            elif 'ساع' in unit: delta = timedelta(hours=amount)
-            elif 'يوم' in unit or 'أيام' in unit or 'ايام' in unit: delta = timedelta(days=amount)
-            elif 'أسبوع' in unit or 'اسبوع' in unit or 'أسابيع' in unit: delta = timedelta(weeks=amount)
-            elif 'شهر' in unit or 'أشهر' in unit: delta = timedelta(days=amount * 30)
-            elif 'سنة' in unit or 'سنوات' in unit: delta = timedelta(days=amount * 365)
-            
-            return (now - delta).isoformat()
-            
-        # محاولة قراءة تاريخ ثابت (May 20, 2024 / 2025/12/15)
-        try:
-            # Try MM/DD/YYYY or similar common formats
-            for fmt in ['%B %d, %Y', '%Y/%m/%d', '%d/%m/%Y', '%Y-%m-%d']:
-                try:
-                    dt = datetime.strptime(text, fmt)
-                    return dt.isoformat()
-                except: continue
-        except:
-            pass
-            
-        return None # Return None if we can't parse it
-    except:
-        return None
-
 def send_data_to_backend(payload):
-    """إرسال البيانات إلى الخادم الرئيسي"""
+    """إرسال البيانات إلى الخادم الرئيسي مع دعم الضغط"""
     try:
         endpoint = f"{NODE_BACKEND_URL}/api/scraper/receive"
-        headers = { 'Content-Type': 'application/json', 'Authorization': API_SECRET, 'x-api-secret': API_SECRET }
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': API_SECRET,
+            'x-api-secret': API_SECRET,
+            'Accept-Encoding': 'gzip, deflate'
+        }
         response = requests.post(endpoint, json=payload, headers=headers, timeout=60)
         return response.status_code == 200
     except Exception as e:
         print(f"❌ Failed to send data: {e}")
         return False
-
-def check_existing_chapters(title):
-    """التحقق من الفصول الموجودة في الباك إند لمنع التكرار"""
-    try:
-        endpoint = f"{NODE_BACKEND_URL}/api/scraper/check-chapters"
-        headers = { 'Content-Type': 'application/json', 'Authorization': API_SECRET, 'x-api-secret': API_SECRET }
-        response = requests.post(endpoint, json={'title': title}, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('exists'):
-                return data['chapters']
-            else:
-                return []
-        return []
-    except Exception as e:
-        print(f"❌ Error checking existence: {e}")
-        return []
 
 # ==========================================
 # 🟣 1. Rewayat Club (Nuxt) Logic
@@ -184,7 +230,6 @@ def extract_from_nuxt(soup):
         for script in scripts:
             if script.string and 'window.__NUXT__' in script.string:
                 content = script.string
-                # Extract poster
                 match = re.search(r'poster_url:"(.*?)"', content)
                 if not match: match = re.search(r'poster:"(.*?)"', content)
                 if match:
@@ -195,9 +240,9 @@ def extract_from_nuxt(soup):
 
 def fetch_metadata_rewayat(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
@@ -211,39 +256,24 @@ def fetch_metadata_rewayat(url):
         desc_div = soup.find(class_='text-pre-line') or soup.find('div', class_='v-card__text')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
         
-        # 🔥🔥 STATUS CHECK - REWAYAT CLUB SPECIFIC 🔥🔥
         status = "مستمرة"
-        # 1. Check for specific status badges in Vuetify chips
         chips = soup.find_all(class_='v-chip__content')
         for chip in chips:
             txt = chip.get_text(strip=True)
             if "مكتملة" in txt or "Completed" in txt:
                 status = "مكتملة"
                 break
-        
-        # 2. Fallback: Search in full text if not found
-        if status == "مستمرة":
-            if "مكتملة" in soup.get_text():
-                status = "مكتملة"
+        if status == "مستمرة" and "مكتملة" in soup.get_text():
+            status = "مكتملة"
 
-        # 🔥 EXTRACT REAL LAST UPDATE DATE (NUXT/Vue Logic) 🔥
         last_update = None
-        
-        # Try finding date pattern YYYY/MM/DD in list items text content directly
-        # Example from provided HTML: 2025/12/16 inside v-list-item__subtitle
-        # We look for date patterns anywhere in the HTML body text to be safe or specific elements
-        
-        # Method 1: Regex search in subtitles
         subtitles = soup.find_all(class_='v-list-item__subtitle')
         for sub in subtitles:
             txt = sub.get_text(strip=True)
-            # Match date YYYY/MM/DD
             date_match = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', txt)
             if date_match:
                 last_update = parse_relative_date(date_match.group(1))
                 if last_update: break 
-        
-        # Do NOT default to now. If None, it means we couldn't find a new date.
         
         return {
             'title': title, 'description': description, 'cover': cover_url,
@@ -257,9 +287,9 @@ def fetch_metadata_rewayat(url):
 def scrape_chapter_rewayat(novel_url, chapter_num):
     url = f"{novel_url.rstrip('/')}/{chapter_num}"
     try:
-        response = requests.get(url, headers=get_headers(), timeout=10)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=10)
         if response.status_code != 200: return None, None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         paragraphs = soup.find_all('p')
         clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
         if clean_paragraphs:
@@ -280,12 +310,12 @@ def worker_rewayat_probe(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    # Send initial meta update
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
     current_chapter = 1
     errors = 0
     batch = []
+    BATCH_SIZE = 10  # زيادة حجم الدفعة
     
     while current_chapter < 5000 and errors < 15:
         if current_chapter in existing_chapters:
@@ -298,7 +328,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
             errors = 0
             batch.append({'number': current_chapter, 'title': chap_title, 'content': content})
             print(f"Fetched Ch {current_chapter}")
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
@@ -311,7 +341,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# 🟢 2. Madara Themes (Ar-Novel & Markaz Riwayat - Updated for NEW DESIGN)
+# 🟢 2. Madara Themes (Ar-Novel & Markaz Riwayat)
 # ==========================================
 
 def get_base_url(url):
@@ -325,34 +355,29 @@ def clean_madara_title(raw_title):
 def fetch_metadata_madara(url):
     try:
         use_cookies = 'markazriwayat.com' in url
-        response = requests.get(url, headers=get_headers(use_cookies=use_cookies), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(use_cookies=use_cookies), timeout=15)
         
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # --- Check for NEW Markaz Riwayat Design (Theam App) ---
         is_new_design = bool(soup.select_one('.manga-title'))
         
         if is_new_design:
-            # 1. Title
             title_tag = soup.select_one('h1.manga-title')
             title = title_tag.get_text(strip=True) if title_tag else "Unknown"
             
-            # 2. Cover
             cover = ""
             img_tag = soup.select_one('.manga-cover-wrap img')
             if img_tag:
                 cover = img_tag.get('data-src') or img_tag.get('src')
             cover = fix_image_url(cover)
             
-            # 3. Description
             desc_div = soup.find('div', id='manga-summary')
             if desc_div:
                 description = desc_div.get_text(separator="\n\n", strip=True)
             else:
                 description = ""
             
-            # 4. Status
             status = "مستمرة"
             status_pill = soup.select_one('.manga-status-pill')
             if status_pill:
@@ -360,16 +385,13 @@ def fetch_metadata_madara(url):
                 if "مكتملة" in txt or "Completed" in txt:
                     status = "مكتملة"
             
-            # 5. Categories (Tags)
             tags = []
             pill_links = soup.select('.pill-list .pill')
             for pill in pill_links:
                 tags.append(pill.get_text(strip=True))
             category = tags[0] if tags else "عام"
             
-            # 6. Novel ID
             novel_id = None
-            # Try to get from buttons or data attributes
             like_btn = soup.select_one('.manga-like-btn')
             if like_btn and like_btn.has_attr('data-manga-id'):
                 novel_id = like_btn['data-manga-id']
@@ -378,14 +400,12 @@ def fetch_metadata_madara(url):
                 if rating_btn and rating_btn.has_attr('data-manga-id'):
                     novel_id = rating_btn['data-manga-id']
             
-            # 7. Last Update (from latest chapter in list)
             last_update = None
             first_ch_row = soup.select_one('.ch-list .ch-row .ch-date')
             if first_ch_row:
                 last_update = parse_relative_date(first_ch_row.get_text(strip=True))
 
         else:
-            # --- OLD Standard Madara Design ---
             title_tag = soup.find(class_='post-title')
             title = title_tag.find('h1').get_text(strip=True) if title_tag else "Unknown"
             title = re.sub(r'\s*~.*$', '', title) 
@@ -466,40 +486,28 @@ def fetch_metadata_markaz(url):
 def parse_madara_chapters_from_html(soup):
     chapters = []
     
-    # 1. Try NEW Design Selector (.ch-list .ch-row)
     new_rows = soup.select('.ch-list .ch-row')
     if new_rows:
         for row in new_rows:
-            # Link is usually the anchor tag wrapping or inside the row
             a = row.find('a')
             if not a: continue
-            
             link = a.get('href')
-            
-            # Extract Number from .ch-num
             num_div = row.select_one('.ch-num')
             number = 0
             if num_div:
                 try:
                     number = int(num_div.get_text(strip=True))
                 except: pass
-            
-            # If number not found in div, try from link or title
             if number == 0:
                 num_match = re.search(r'(\d+)', link)
                 if num_match: number = int(num_match.group(1))
-
-            # Extract Title from .ch-title
             title_div = row.select_one('.ch-title')
             raw_title = title_div.get_text(strip=True) if title_div else f"Chapter {number}"
             clean_title = clean_madara_title(raw_title)
-
             if number > 0:
                 chapters.append({'number': number, 'url': link, 'title': clean_title})
-        
         return chapters
 
-    # 2. Try OLD Design Selector (li.wp-manga-chapter)
     items = soup.find_all('li', class_='wp-manga-chapter')
     if items:
         for item in items:
@@ -521,43 +529,36 @@ def fetch_chapter_list_madara(novel_id, novel_url):
     base_url = get_base_url(novel_url)
     use_cookies = 'markazriwayat.com' in novel_url
     
-    # Try getting chapters from the loaded page HTML first (if provided in variable, but here we fetch fresh)
-    # Some new designs load chapters directly in the HTML without AJAX if they are few, 
-    # but mostly they use AJAX or Load More.
-    
-    # 1. Try Standard Madara AJAX
     if novel_url:
         ajax_endpoint = f"{novel_url.rstrip('/')}/ajax/chapters/"
         try:
             headers = get_headers(use_cookies=use_cookies)
             headers['X-Requested-With'] = 'XMLHttpRequest'
-            res = requests.post(ajax_endpoint, headers=headers, timeout=20)
+            res = request_with_retry('POST', ajax_endpoint, headers=headers, timeout=20)
             if res.status_code == 200:
-                soup = BeautifulSoup(res.content, 'html.parser')
+                soup = BeautifulSoup(res.content, 'lxml')
                 chapters = parse_madara_chapters_from_html(soup)
                 print(f"✅ Chapters fetched via /ajax/chapters/ ({len(chapters)})")
         except Exception as e:
             print(f"AJAX endpoint failed: {e}")
 
-    # 2. Try Admin AJAX (Fallback)
     if not chapters and novel_id:
         try:
             admin_ajax_url = f"{base_url}/wp-admin/admin-ajax.php"
             data = {'action': 'manga_get_chapters', 'manga': novel_id}
-            res = requests.post(admin_ajax_url, data=data, headers=get_headers(novel_url, use_cookies=use_cookies), timeout=20)
+            res = request_with_retry('POST', admin_ajax_url, data=data, headers=get_headers(novel_url, use_cookies=use_cookies), timeout=20)
             if res.status_code == 200:
-                soup = BeautifulSoup(res.content, 'html.parser')
+                soup = BeautifulSoup(res.content, 'lxml')
                 chapters = parse_madara_chapters_from_html(soup)
                 print(f"✅ Chapters fetched via admin-ajax ({len(chapters)})")
         except Exception as e:
             print(f"admin-ajax failed: {e}")
     
-    # 3. Try parsing the novel page directly (If the new design puts chapters in the DOM)
     if not chapters and novel_url:
         try:
-            res = requests.get(novel_url, headers=get_headers(use_cookies=use_cookies), timeout=15)
+            res = request_with_retry('GET', novel_url, headers=get_headers(use_cookies=use_cookies), timeout=15)
             if res.status_code == 200:
-                soup = BeautifulSoup(res.content, 'html.parser')
+                soup = BeautifulSoup(res.content, 'lxml')
                 chapters = parse_madara_chapters_from_html(soup)
                 print(f"✅ Chapters fetched via direct HTML ({len(chapters)})")
         except Exception as e:
@@ -571,11 +572,10 @@ def fetch_chapter_list_madara(novel_id, novel_url):
 def scrape_chapter_madara(url):
     try:
         use_cookies = 'markazriwayat.com' in url
-        res = requests.get(url, headers=get_headers(use_cookies=use_cookies), timeout=15)
+        res = request_with_retry('GET', url, headers=get_headers(use_cookies=use_cookies), timeout=15)
         if res.status_code != 200: return None
-        soup = BeautifulSoup(res.content, 'html.parser')
+        soup = BeautifulSoup(res.content, 'lxml')
         
-        # Selectors: Old Madara + New Markaz (.reading-content with .text-right)
         container = soup.find(class_='reader-target') or \
                     soup.find(class_='reading-content') or \
                     soup.find(class_='text-left') or \
@@ -583,13 +583,11 @@ def scrape_chapter_madara(url):
                     soup.find(class_='entry-content')
             
         if container:
-            # Check if there is a nested .text-right inside .reading-content (New Design)
             inner_text_right = container.find(class_='text-right')
             if inner_text_right:
                 container = inner_text_right
 
             for bad in container.find_all(['div', 'script', 'style', 'input', 'ins', 'iframe', 'button']):
-                # Clean specific classes
                 if bad.get('class') and any(c in ['nav-links', 'code-block', 'adsbygoogle', 'pf-ad', 'wpmcr-under-title-row'] for c in bad.get('class')):
                     bad.decompose()
                 if bad.get('id') == 'reader-btn':
@@ -625,6 +623,7 @@ def worker_madara_list(url, admin_email, metadata):
     print(f"Processing {len(all_chapters)} chapters.")
     
     batch = []
+    BATCH_SIZE = 10
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
@@ -639,7 +638,7 @@ def worker_madara_list(url, admin_email, metadata):
                 'content': content
             })
             
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1.5)
@@ -653,14 +652,12 @@ def worker_madara_list(url, admin_email, metadata):
 
 def fetch_metadata_novelfire(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # Update: Use dedicated classes if possible based on new HTML
         title_tag = soup.select_one('h1.novel-title')
         if not title_tag:
-            # Fallback to OG
             meta_title = soup.find("meta", property="og:title")
             title = meta_title["content"] if meta_title else "Unknown Title"
         else:
@@ -668,7 +665,6 @@ def fetch_metadata_novelfire(url):
             
         title = title.replace(' - Novel Fire', '').strip()
 
-        # Cover (Updated selector)
         cover = ""
         img_tag = soup.select_one('figure.cover img')
         if img_tag:
@@ -680,7 +676,6 @@ def fetch_metadata_novelfire(url):
             
         cover = fix_image_url(cover, base_url='https://novelfire.net')
 
-        # Description (Updated selector for .summary .content)
         desc_div = soup.select_one('.summary .content')
         if not desc_div:
             desc_div = soup.find('div', class_='description') or soup.find('div', id='novel-summary')
@@ -688,7 +683,6 @@ def fetch_metadata_novelfire(url):
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
 
         tags = []
-        # Updated genre selector
         genre_links = soup.select('.categories ul li a')
         if not genre_links:
             genre_links = soup.select('.novel-genres a')
@@ -697,13 +691,11 @@ def fetch_metadata_novelfire(url):
             tags.append(link.get_text(strip=True))
         category = tags[0] if tags else "عام"
 
-        # 🔥🔥 STATUS CHECK - NOVEL FIRE SPECIFIC 🔥🔥
         status = "مستمرة"
         completed_tag = soup.find('strong', class_='completed')
         if completed_tag and 'Completed' in completed_tag.get_text(strip=True):
             status = "مكتملة"
 
-        # 🔥 Extract Last Update Time
         last_update = datetime.now().isoformat()
         update_node = soup.select_one('.chapter-latest-container .update')
         if update_node:
@@ -720,32 +712,27 @@ def fetch_metadata_novelfire(url):
         return None
 
 def fetch_chapter_list_novelfire(novel_url):
-    """سحب جميع الفصول من NovelFire مع دعم التنقل بين الصفحات (Pagination)"""
     chapters = []
-    # التأكد من الذهاب لصفحة الفصول
     if not novel_url.rstrip('/').endswith('/chapters'):
         list_url = novel_url.rstrip('/') + '/chapters'
     else:
         list_url = novel_url
 
     try:
-        # البدء من الصفحة الأولى
         current_page = 1
         
         while True:
-            # تكوين رابط الصفحة الحالية
             page_url = f"{list_url}?page={current_page}"
             print(f"🔍 Fetching chapters from NovelFire Page: {current_page}")
             
-            res = requests.get(page_url, headers=get_headers(), timeout=15)
+            res = request_with_retry('GET', page_url, headers=get_headers(), timeout=15)
             if res.status_code != 200: break
             
-            soup = BeautifulSoup(res.content, 'html.parser')
+            soup = BeautifulSoup(res.content, 'lxml')
             
-            # استخراج الفصول من الصفحة الحالية
             items = soup.select('ul.chapter-list li')
             if not items:
-                break # لا توجد فصول، توقف
+                break
                 
             for item in items:
                 a = item.find('a')
@@ -754,7 +741,6 @@ def fetch_chapter_list_novelfire(novel_url):
                     link = 'https://novelfire.net' + href if href.startswith('/') else href
                     raw_title = a.get_text(strip=True)
                     
-                    # استخراج رقم الفصل من الرابط أو العنوان
                     num_match = re.search(r'chapter-(\d+)', link)
                     if not num_match: num_match = re.search(r'(\d+)', raw_title)
                     
@@ -762,16 +748,13 @@ def fetch_chapter_list_novelfire(novel_url):
                     if number > 0:
                         chapters.append({'number': number, 'url': link, 'title': raw_title})
             
-            # التحقق مما إذا كانت هناك صفحة تالية (Next)
-            # نبحث عن زر Next في Pagination
             next_btn = soup.select_one('li.page-item a[rel="next"]')
             if next_btn:
                 current_page += 1
-                time.sleep(0.5) # تأخير بسيط لتجنب الضغط على السيرفر
+                time.sleep(0.5)
             else:
-                break # لا توجد صفحة تالية، انتهينا
+                break
 
-        # ترتيب جميع الفصول المجمعة من كل الصفحات
         chapters.sort(key=lambda x: x['number'])
         print(f"✅ Total chapters found across all pages: {len(chapters)}")
         return chapters
@@ -781,9 +764,9 @@ def fetch_chapter_list_novelfire(novel_url):
 
 def scrape_chapter_novelfire(url):
     try:
-        res = requests.get(url, headers=get_headers(), timeout=15)
+        res = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if res.status_code != 200: return None
-        soup = BeautifulSoup(res.content, 'html.parser')
+        soup = BeautifulSoup(res.content, 'lxml')
         
         container = soup.find('div', id='content') or soup.find('div', class_='chapter-content')
         if container:
@@ -802,7 +785,6 @@ def worker_novelfire_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    # Always update metadata to sync status (Completed), sourceUrl AND lastUpdate
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
     all_chapters = fetch_chapter_list_novelfire(url)
@@ -811,6 +793,7 @@ def worker_novelfire_list(url, admin_email, metadata):
         return
 
     batch = []
+    BATCH_SIZE = 10
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
@@ -819,7 +802,7 @@ def worker_novelfire_list(url, admin_email, metadata):
         content = scrape_chapter_novelfire(chap['url'])
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
@@ -833,30 +816,25 @@ def worker_novelfire_list(url, admin_email, metadata):
 
 def fetch_metadata_wuxiabox(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # Title
         title_tag = soup.select_one('h1.novel-title')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown"
         
-        # Cover
         cover = ""
         img_tag = soup.select_one('figure.cover img')
         if img_tag:
             cover = img_tag.get('data-src') or img_tag.get('src')
         
-        # Domain parsing for base url
         parsed_uri = urlparse(url)
         base_url = '{uri.scheme}://{uri.netloc}'.format(uri=parsed_uri)
         cover = fix_image_url(cover, base_url=base_url)
 
-        # Description
         desc_div = soup.select_one('.summary .content') or soup.select_one('.description')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
 
-        # Tags & Category
         tags = []
         tags_container = soup.select('.tags a.tag')
         for t in tags_container:
@@ -892,15 +870,13 @@ def fetch_chapter_list_wuxiabox(url, metadata):
         
         while True:
             print(f"🔍 Fetching chapters from WuxiaBox: {current_url}")
-            response = requests.get(current_url, headers=get_headers(), timeout=15)
+            response = request_with_retry('GET', current_url, headers=get_headers(), timeout=15)
             if response.status_code != 200: break
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            soup = BeautifulSoup(response.content, 'lxml')
             
-            # Extract chapters
             chapter_list = soup.select('ul.chapter-list li a')
             if not chapter_list:
-                # Sometimes list is dynamic, but usually on these sites it's paginated
                 break
                 
             for a in chapter_list:
@@ -908,9 +884,6 @@ def fetch_chapter_list_wuxiabox(url, metadata):
                 full_link = urljoin(base_url, href)
                 title = a.get('title') or a.get_text(strip=True)
                 
-                # Extract number
-                # Often format is "Chapter 123 title" or just "Chapter 123"
-                # Using regex to find the first integer in the text
                 num_match = re.search(r'Chapter\s+(\d+)', title, re.IGNORECASE)
                 if not num_match:
                     num_match = re.search(r'(\d+)', title)
@@ -919,15 +892,12 @@ def fetch_chapter_list_wuxiabox(url, metadata):
                     number = int(num_match.group(1))
                     chapters.append({'number': number, 'url': full_link, 'title': title})
             
-            # Find Next Page
-            # The pagination is usually in ul.pagination
             next_btn = None
             pagination_links = soup.select('ul.pagination li a')
             for link in pagination_links:
                 if '>' in link.get_text() or 'Next' in link.get_text():
                     next_btn = link
                     break
-                # Sometimes it is just the last link if not numbered
                 
             if next_btn:
                 next_href = next_btn.get('href')
@@ -936,7 +906,6 @@ def fetch_chapter_list_wuxiabox(url, metadata):
             else:
                 break
         
-        # Remove duplicates based on number
         unique_chapters = {c['number']: c for c in chapters}.values()
         chapters = list(unique_chapters)
         chapters.sort(key=lambda x: x['number'])
@@ -949,24 +918,21 @@ def fetch_chapter_list_wuxiabox(url, metadata):
 
 def scrape_chapter_wuxiabox(url):
     try:
-        res = requests.get(url, headers=get_headers(), timeout=15)
+        res = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if res.status_code != 200: return None
-        soup = BeautifulSoup(res.content, 'html.parser')
+        soup = BeautifulSoup(res.content, 'lxml')
         
         content_div = soup.select_one('.chapter-content')
         if not content_div: return None
         
-        # Clean ads
         for script in content_div.find_all('script'):
             script.decompose()
         for div in content_div.find_all('div'):
-            # Usually ads are in divs inside content
             div.decompose()
         for style in content_div.find_all('style'):
             style.decompose()
             
         text = content_div.get_text(separator="\n\n", strip=True)
-        # Cleanup
         text = re.sub(r'\(End of this chapter\)', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\n{3,}', '\n\n', text)
         
@@ -985,6 +951,7 @@ def worker_wuxiabox_list(url, admin_email, metadata):
         return
 
     batch = []
+    BATCH_SIZE = 10
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
@@ -994,7 +961,7 @@ def worker_wuxiabox_list(url, admin_email, metadata):
         
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
@@ -1008,21 +975,17 @@ def worker_wuxiabox_list(url, admin_email, metadata):
 
 def fetch_metadata_freewebnovel(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # Title
         title_tag = soup.find("meta", property="og:title")
         title = title_tag["content"] if title_tag else soup.select_one('h1.tit').get_text(strip=True)
-        # Remove site suffix
         title = title.split(' - ')[0].strip()
 
-        # Cover
         cover_tag = soup.find("meta", property="og:image")
         cover = cover_tag["content"] if cover_tag else ""
         
-        # Description
         desc_div = soup.select_one('.m-desc .txt .inner')
         if desc_div:
             description = desc_div.get_text(separator="\n\n", strip=True)
@@ -1030,13 +993,11 @@ def fetch_metadata_freewebnovel(url):
             desc_meta = soup.find("meta", property="og:description")
             description = desc_meta["content"] if desc_meta else ""
 
-        # Status
         status = "مستمرة"
         status_node = soup.select_one('.m-imgtxt .item span.s3 a')
         if status_node and 'Completed' in status_node.get_text():
             status = "مكتملة"
 
-        # Categories
         tags = []
         genre_links = soup.select('.m-imgtxt .item a[href*="genre"]')
         for link in genre_links:
@@ -1055,24 +1016,21 @@ def fetch_metadata_freewebnovel(url):
 def fetch_chapter_list_freewebnovel(url):
     chapters = []
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return []
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # List items
         items = soup.select('ul#idData li a')
         for a in items:
             href = a.get('href')
             full_link = urljoin('https://freewebnovel.com', href)
             title = a.get('title') or a.get_text(strip=True)
             
-            # Extract number
             match = re.search(r'Chapter\s+(\d+)', title, re.IGNORECASE)
             if match:
                 num = int(match.group(1))
                 chapters.append({'number': num, 'url': full_link, 'title': title})
         
-        # Deduplicate and sort
         unique = {c['number']: c for c in chapters}.values()
         chapters = list(unique)
         chapters.sort(key=lambda x: x['number'])
@@ -1083,20 +1041,17 @@ def fetch_chapter_list_freewebnovel(url):
 
 def scrape_chapter_freewebnovel(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
         content_div = soup.select_one('.m-read .txt')
         if not content_div: return None
         
-        # Clean specific trash found in file
         for bad in content_div.find_all(['script', 'style', 'subtxt', 'div', 'center']):
             bad.decompose()
             
-        # Clean text
         text = content_div.get_text(separator="\n\n", strip=True)
-        # Remove common ads in text if any remain
         text = re.sub(r'Find.*novels.*at.*freewebnovel.*', '', text, flags=re.IGNORECASE)
         return text
     except: return None
@@ -1110,6 +1065,7 @@ def worker_freewebnovel_list(url, admin_email, metadata):
     all_chapters = fetch_chapter_list_freewebnovel(url)
     
     batch = []
+    BATCH_SIZE = 10
     for chap in all_chapters:
         if chap['number'] in existing_chapters: continue
         
@@ -1118,7 +1074,7 @@ def worker_freewebnovel_list(url, admin_email, metadata):
         
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
@@ -1132,33 +1088,28 @@ def worker_freewebnovel_list(url, admin_email, metadata):
 
 def fetch_metadata_fanmtl(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # Title
         title_tag = soup.find('h1', class_='novel-title')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown"
         
-        # Cover
         cover = ""
         img_tag = soup.select_one('figure.cover img')
         if img_tag:
             cover = img_tag.get('data-src') or img_tag.get('src')
         cover = fix_image_url(cover, base_url='https://www.fanmtl.com')
         
-        # Description
         desc_div = soup.select_one('.summary .content')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
         
-        # Status
         status = "مستمرة"
         status_tag = soup.select_one('.header-stats')
         if status_tag:
             txt = status_tag.get_text(strip=True).lower()
             if 'completed' in txt: status = "مكتملة"
             
-        # Category / Tags
         tags = []
         cat_links = soup.select('.categories a')
         for link in cat_links:
@@ -1180,10 +1131,10 @@ def fetch_chapter_list_fanmtl(url):
     try:
         current_url = url
         
-        response = requests.get(current_url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', current_url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return []
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
         wjm = None
         match = re.search(r'wjm=([^&\"\']+)', response.text)
@@ -1196,9 +1147,9 @@ def fetch_chapter_list_fanmtl(url):
                 if not wjm: break
                 page_url = f"{base_url}/e/extend/fy.php?page={page}&wjm={wjm}"
                 print(f"🔍 Fetching Fanmtl chapters page {page}: {page_url}")
-                res = requests.get(page_url, headers=get_headers(), timeout=15)
+                res = request_with_retry('GET', page_url, headers=get_headers(), timeout=15)
                 if res.status_code != 200: break
-                soup = BeautifulSoup(res.content, 'html.parser')
+                soup = BeautifulSoup(res.content, 'lxml')
                 
             items = soup.select('ul.chapter-list li a')
             if not items and page > 0: break
@@ -1233,7 +1184,6 @@ def fetch_chapter_list_fanmtl(url):
             page += 1
             time.sleep(0.5)
             
-        # Deduplicate and sort
         unique = {c['number']: c for c in chapters}.values()
         chapters = list(unique)
         chapters.sort(key=lambda x: x['number'])
@@ -1244,11 +1194,10 @@ def fetch_chapter_list_fanmtl(url):
 
 def scrape_chapter_fanmtl(url):
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
         
-        # Fanmtl chapter content selectors
         content_div = soup.select_one('.chapter-content') or \
                       soup.select_one('.reading-content') or \
                       soup.select_one('#chapter-content') or \
@@ -1259,7 +1208,6 @@ def scrape_chapter_fanmtl(url):
         
         if not content_div: return None
         
-        # Clean trash
         for bad in content_div.find_all(['script', 'style', 'div', 'iframe', 'ins']):
             bad.decompose()
             
@@ -1281,6 +1229,7 @@ def worker_fanmtl_list(url, admin_email, metadata):
         return
 
     batch = []
+    BATCH_SIZE = 10
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
@@ -1290,7 +1239,7 @@ def worker_fanmtl_list(url, admin_email, metadata):
         
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
@@ -1303,46 +1252,35 @@ def worker_fanmtl_list(url, admin_email, metadata):
 # ==========================================
 
 def clean_novelbin_title(raw_title):
-    """تنظيف عنوان الرواية من النصوص الإضافية"""
     if not raw_title:
         return "Unknown Title"
-    # إزالة أي جزء مثل " - Novel Bin" أو "Read ... Online For Free"
     cleaned = re.sub(r'\s*[-–|]\s*(?:Novel Bin|Read.*?Online.*?Free).*$', '', raw_title, flags=re.IGNORECASE).strip()
-    # إزالة الأقواس غير المرغوب فيها
     cleaned = re.sub(r'\s*\(.*?\)\s*$', '', cleaned).strip()
     return cleaned if cleaned else raw_title
 
 def extract_novel_id_from_url(url):
-    """استخراج معرف الرواية (slug) من الرابط"""
-    # مثال: https://novelbin.com/b/top-tier-providence-secretly-cultivate-for-a-thousand-years
     match = re.search(r'/b/([^/]+)', url)
     if match:
         return match.group(1)
     return None
 
 def fetch_metadata_novelbin(url):
-    """استخراج بيانات الرواية من novelbin.com - نسخة محسّنة"""
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = request_with_retry('GET', url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
             print(f"⚠️ NovelBin metadata fetch failed with status {response.status_code}")
             return None
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'lxml')
 
-        # 1. العنوان - البحث بعدة طرق
         title = "Unknown Title"
-        
-        # الطريقة الأولى: h1 مع itemprop="name" داخل breadcrumb
         title_tag = soup.find('h1', itemprop='name')
         if title_tag:
             title = title_tag.get_text(strip=True)
         else:
-            # الطريقة الثانية: h1 بشكل عام
             title_tag = soup.find('h1')
             if title_tag:
                 title = title_tag.get_text(strip=True)
             else:
-                # الطريقة الثالثة: meta og:title
                 og_title = soup.find('meta', property='og:title')
                 if og_title:
                     title = og_title.get('content', '')
@@ -1350,7 +1288,6 @@ def fetch_metadata_novelbin(url):
         title = clean_novelbin_title(title)
         print(f"📌 Extracted title: {title}")
 
-        # 2. الغلاف
         cover = ""
         img_meta = soup.find('meta', property='og:image')
         if img_meta:
@@ -1362,7 +1299,6 @@ def fetch_metadata_novelbin(url):
         cover = fix_image_url(cover, base_url='https://novelbin.com')
         print(f"📌 Cover: {cover}")
 
-        # 3. الوصف
         description = ""
         desc_tag = soup.find('meta', property='og:description')
         if desc_tag:
@@ -1372,13 +1308,11 @@ def fetch_metadata_novelbin(url):
             if desc_div:
                 description = desc_div.get_text(separator="\n\n", strip=True)
         if not description:
-            # محاولة أخرى: meta name="description"
             desc_meta = soup.find('meta', attrs={'name': 'description'})
             if desc_meta:
                 description = desc_meta.get('content', '').strip()
         print(f"📌 Description length: {len(description)}")
 
-        # 4. الحالة
         status = "مستمرة"
         status_meta = soup.find('meta', property='og:novel:status')
         if status_meta:
@@ -1386,13 +1320,11 @@ def fetch_metadata_novelbin(url):
             if 'completed' in st:
                 status = "مكتملة"
         if status == "مستمرة":
-            # fallback: من النص أو الرابط
             status_elem = soup.select_one('.info-meta li a[href*="completed"]')
             if status_elem:
                 status = "مكتملة"
         print(f"📌 Status: {status}")
 
-        # 5. التصنيفات
         tags = []
         genre_meta = soup.find('meta', property='og:novel:genre')
         if genre_meta:
@@ -1406,7 +1338,6 @@ def fetch_metadata_novelbin(url):
         category = tags[0] if tags else "عام"
         print(f"📌 Tags: {tags}")
 
-        # 6. آخر تحديث
         last_update = None
         update_meta = soup.find('meta', property='og:novel:update_time')
         if update_meta:
@@ -1417,7 +1348,6 @@ def fetch_metadata_novelbin(url):
                 last_update = parse_relative_date(time_elem.get_text(strip=True))
         print(f"📌 Last update: {last_update}")
 
-        # 7. استخراج معرف الرواية (novel_id) من الرابط
         novel_id = extract_novel_id_from_url(url)
         print(f"📌 Novel ID: {novel_id}")
 
@@ -1438,7 +1368,6 @@ def fetch_metadata_novelbin(url):
         return None
 
 def fetch_chapter_list_novelbin(novel_url, novel_id):
-    """استخراج جميع الفصول عبر endpoint /ajax/chapter-archive?novelId=..."""
     chapters = []
     if not novel_id:
         novel_id = extract_novel_id_from_url(novel_url)
@@ -1446,21 +1375,18 @@ def fetch_chapter_list_novelbin(novel_url, novel_id):
         print("⚠️ Could not extract novel_id")
         return chapters
 
-    # بناء رابط الـ AJAX الصحيح
     ajax_url = f"https://novelbin.com/ajax/chapter-archive?novelId={novel_id}"
     try:
         headers = get_headers(referer=novel_url)
         headers['X-Requested-With'] = 'XMLHttpRequest'
-        response = requests.get(ajax_url, headers=headers, timeout=20)
+        response = request_with_retry('GET', ajax_url, headers=headers, timeout=20)
         if response.status_code != 200:
             print(f"⚠️ AJAX request failed with status {response.status_code}")
             return chapters
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-        # الفصول موجودة في ul.list-chapter داخل HTML المُرجَع
+        soup = BeautifulSoup(response.content, 'lxml')
         chapter_links = soup.select('ul.list-chapter li a')
         if not chapter_links:
-            # محاولة بديلة: البحث عن أي رابط يحتوي على /chapter- في الصفحة
             chapter_links = soup.find_all('a', href=re.compile(r'/chapter-\d+'))
 
         print(f"📌 Found {len(chapter_links)} chapter links in AJAX response")
@@ -1475,7 +1401,6 @@ def fetch_chapter_list_novelbin(novel_url, novel_id):
             if number > 0:
                 chapters.append({'number': number, 'url': full_url, 'title': raw_title})
 
-        # إزالة التكرار وفرز حسب الرقم
         unique = {c['number']: c for c in chapters}.values()
         chapters = sorted(unique, key=lambda x: x['number'])
         print(f"📌 Total unique chapters from AJAX: {len(chapters)}")
@@ -1486,13 +1411,12 @@ def fetch_chapter_list_novelbin(novel_url, novel_id):
         return chapters
 
 def scrape_chapter_novelbin(chapter_url, max_retries=5):
-    """استخراج محتوى الفصل من novelbin.com مع إعادة المحاولة عند تلقي 429"""
     for attempt in range(max_retries):
         try:
-            response = requests.get(chapter_url, headers=get_headers(), timeout=15)
+            response = request_with_retry('GET', chapter_url, headers=get_headers(), timeout=15)
             
             if response.status_code == 429:
-                wait_time = (attempt + 1) * 10  # 10, 20, 30, 40, 50 ثانية
+                wait_time = (attempt + 1) * 10
                 print(f"⚠️ Rate limited (429) for {chapter_url}. Waiting {wait_time}s before retry {attempt+1}/{max_retries}")
                 time.sleep(wait_time)
                 continue
@@ -1501,34 +1425,25 @@ def scrape_chapter_novelbin(chapter_url, max_retries=5):
                 print(f"⚠️ NovelBin chapter scrape failed with status {response.status_code}")
                 return None
                 
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            # محتوى الفصل داخل div#chr-content
+            soup = BeautifulSoup(response.content, 'lxml')
             content_div = soup.find('div', id='chr-content')
             if not content_div:
                 print("⚠️ Could not find #chr-content")
                 return None
 
-            # إزالة العناصر غير المرغوب فيها (إعلانات، نصوص زائدة)
             for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button']):
-                # نحتفظ بالنص، فقط نزيل العناصر التي قد تحوي إعلانات
                 if bad.get('class') and any(c in str(bad.get('class')).lower() for c in ['ad', 'ads', 'banner', 'popup', 'pf-']):
                     bad.decompose()
                 elif bad.get('id') and any(c in bad.get('id').lower() for c in ['ad', 'ads', 'banner']):
                     bad.decompose()
                 else:
-                    # بدلاً من decompose، نستبدل بمسافة للحفاظ على النص المحيط
                     bad.replace_with(' ')
 
-            # إزالة عناصر div التي تحوي إعلانات
             for div in content_div.find_all('div', class_=re.compile(r'(ad|banner|popup|pf-)', re.I)):
                 div.decompose()
 
-            # الحصول على النص
             text = content_div.get_text(separator="\n\n", strip=True)
-            # تنظيف الأسطر الفارغة المتعددة
             text = re.sub(r'\n{3,}', '\n\n', text)
-            # إزالة بعض العبارات الدعائية الشائعة
             text = re.sub(r'Read .*? at .*?\.com', '', text, flags=re.IGNORECASE)
             text = re.sub(r'If you find any errors .*? please let us know', '', text, flags=re.IGNORECASE)
             text = re.sub(r'Support .*? by reading .*? online', '', text, flags=re.IGNORECASE)
@@ -1543,14 +1458,11 @@ def scrape_chapter_novelbin(chapter_url, max_retries=5):
     return None
 
 def worker_novelbin_list(url, admin_email, metadata):
-    """العامل الرئيسي لجلب جميع فصول novelbin.com"""
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
 
-    # إرسال البيانات الأساسية
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
-    # استخدام novel_id من metadata (الموجود الآن)
     novel_id = metadata.get('novel_id')
     all_chapters = fetch_chapter_list_novelbin(url, novel_id)
     if not all_chapters:
@@ -1559,6 +1471,7 @@ def worker_novelbin_list(url, admin_email, metadata):
 
     print(f"📋 Processing {len(all_chapters)} chapters from NovelBin.")
     batch = []
+    BATCH_SIZE = 10
 
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
@@ -1574,11 +1487,10 @@ def worker_novelbin_list(url, admin_email, metadata):
                 'content': content
             })
             print(f"✅ Chapter {chap['number']} scraped successfully")
-            if len(batch) >= 5:
+            if len(batch) >= BATCH_SIZE:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 print(f"📤 Sent batch of {len(batch)} chapters")
                 batch = []
-                # زيادة وقت الانتظار بين الدُفعات لتجنب 429
                 time.sleep(3)
         else:
             print(f"❌ Failed to scrape chapter {chap['number']} after retries")
@@ -1605,9 +1517,8 @@ def configure_scheduler():
     SCHEDULER_CONFIG['interval_seconds'] = int(data.get('interval', 86400))
     SCHEDULER_CONFIG['admin_email'] = data.get('adminEmail', 'system@auto')
     
-    # If activating, set next run immediately if not set
     if SCHEDULER_CONFIG['active'] and SCHEDULER_CONFIG['next_run'] < time.time():
-        SCHEDULER_CONFIG['next_run'] = time.time() + 5 # Run in 5 seconds
+        SCHEDULER_CONFIG['next_run'] = time.time() + 5
         
     return jsonify({
         'message': 'Scheduler Updated',
@@ -1630,7 +1541,6 @@ def trigger_scrape():
         
         if not url: return jsonify({'message': 'No URL provided'}), 400
 
-        # Ensure URL is clean
         if 'rewayat.club' in url:
             meta = fetch_metadata_rewayat(url)
             if not meta: return jsonify({'message': 'Failed metadata'}), 400
@@ -1700,7 +1610,6 @@ def trigger_scrape():
 # ==========================================
 
 def perform_single_scrape(url, admin_email):
-    """Executes scraping for a single URL without creating new threads (synchronous for scheduler)"""
     try:
         if not url: return
         print(f"⏰ Scheduler Checking: {url}")
@@ -1733,7 +1642,6 @@ def perform_single_scrape(url, admin_email):
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
 def scheduler_loop():
-    """Background thread that runs forever"""
     while True:
         try:
             now = time.time()
@@ -1741,7 +1649,6 @@ def scheduler_loop():
                 SCHEDULER_CONFIG['status'] = 'running'
                 print("🚀 [Scheduler] Starting Auto Update Job...")
                 
-                # 1. Fetch Watchlist from Node.js using API Key
                 try:
                     headers = {'x-api-secret': API_SECRET}
                     res = requests.get(f"{NODE_BACKEND_URL}/api/admin/watchlist", headers=headers, timeout=30)
@@ -1752,7 +1659,7 @@ def scheduler_loop():
                         for item in watchlist:
                             if item.get('sourceUrl') and item.get('status') == 'ongoing':
                                 perform_single_scrape(item['sourceUrl'], SCHEDULER_CONFIG['admin_email'])
-                                time.sleep(2) # Politeness delay
+                                time.sleep(2)
                         
                         print("✅ [Scheduler] Job Completed.")
                     else:
@@ -1760,17 +1667,15 @@ def scheduler_loop():
                 except Exception as req_err:
                     print(f"❌ [Scheduler] Connection Error: {req_err}")
 
-                # Update next run time
                 SCHEDULER_CONFIG['last_run'] = now
                 SCHEDULER_CONFIG['next_run'] = now + SCHEDULER_CONFIG['interval_seconds']
                 SCHEDULER_CONFIG['status'] = 'idle'
             
-            time.sleep(5) # Check every 5 seconds
+            time.sleep(5)  # زيادة زمن النوم إلى 10 ثوانٍ
         except Exception as e:
             print(f"🔥 [Scheduler] Critical Loop Error: {e}")
             time.sleep(60)
 
-# Start Scheduler Thread immediately
 scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
 scheduler_thread.start()
 
