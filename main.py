@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 
 
 # ==========================================
-# إعداداتت التطبيق
+# إعدادات التطبيق
 # ==========================================
 app = Flask(__name__)
 CORS(app)
@@ -315,7 +315,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
     current_chapter = 1
     errors = 0
     batch = []
-    BATCH_SIZE = 15  # زيادة حجم الدفعة
+    BATCH_SIZE = 10  # زيادة حجم الدفعة
     
     while current_chapter < 5000 and errors < 15:
         if current_chapter in existing_chapters:
