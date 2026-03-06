@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -1126,6 +1125,218 @@ def worker_freewebnovel_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
+# 🟡 6. FanMTL Logic (Newly Added)
+# ==========================================
+
+def fetch_metadata_fanmtl(url):
+    """استخراج بيانات الرواية من موقع fanmtl"""
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # العنوان
+        title_tag = soup.select_one('h1.novel-title')
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+
+        # الغلاف
+        cover = ""
+        img_tag = soup.select_one('figure.cover img')
+        if img_tag:
+            cover = img_tag.get('data-src') or img_tag.get('src')
+        cover = fix_image_url(cover, base_url='https://fanmtl.com')
+
+        # الوصف
+        desc_div = soup.select_one('div.summary div.content')
+        description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
+
+        # التصنيفات
+        tags = []
+        categories_div = soup.select_one('div.categories')
+        if categories_div:
+            for a in categories_div.select('a.tag'):
+                tag_text = a.get_text(strip=True)
+                if tag_text:
+                    tags.append(tag_text)
+        # إذا لم نجد في div.categories، نبحث عن وسوم a.tag في أي مكان
+        if not tags:
+            for a in soup.select('a.tag'):
+                tag_text = a.get_text(strip=True)
+                if tag_text:
+                    tags.append(tag_text)
+        category = tags[0] if tags else "عام"
+
+        # الحالة
+        status = "مستمرة"
+        stats_div = soup.select_one('div.header-stats')
+        if stats_div:
+            status_strong = stats_div.find('strong', class_=None)  # النص الموجود داخل strong للحالة
+            if status_strong and ('Ongoing' in status_strong.get_text() or 'مستمرة' in status_strong.get_text()):
+                status = "مستمرة"
+            elif status_strong and ('Completed' in status_strong.get_text() or 'مكتملة' in status_strong.get_text()):
+                status = "مكتملة"
+        # إذا لم نجد، نبحث في النص العام
+        if 'Completed' in soup.get_text() or 'مكتملة' in soup.get_text():
+            status = "مكتملة"
+
+        # آخر تحديث - نحاول استخراج تاريخ أول فصل في القائمة
+        last_update = None
+        first_chapter_time = soup.select_one('ul.chapter-list li time')
+        if first_chapter_time:
+            raw_date = first_chapter_time.get_text(strip=True)
+            last_update = parse_relative_date(raw_date)
+
+        return {
+            'title': title,
+            'description': description,
+            'cover': cover,
+            'status': status,
+            'category': category,
+            'tags': tags,
+            'sourceUrl': url,
+            'lastUpdate': last_update
+        }
+    except Exception as e:
+        print(f"Error FanMTL metadata: {e}")
+        return None
+
+def fetch_chapter_list_fanmtl(novel_url):
+    """استخراج قائمة الفصول من صفحة الرواية على fanmtl"""
+    chapters = []
+    try:
+        response = requests.get(novel_url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return chapters
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # البحث عن قائمة الفصول داخل section#chapters
+        chapter_list = soup.select('ul.chapter-list li')
+        if not chapter_list:
+            # محاولة بديلة
+            chapter_list = soup.select('.chapter-list li')
+
+        for li in chapter_list:
+            a = li.find('a')
+            if not a:
+                continue
+            href = a.get('href')
+            if not href:
+                continue
+            full_url = urljoin('https://fanmtl.com', href)
+
+            # استخراج رقم الفصل
+            number_span = li.select_one('span.chapter-no')
+            number = 0
+            if number_span:
+                try:
+                    number = int(number_span.get_text(strip=True))
+                except:
+                    pass
+            if number == 0:
+                # محاولة استخراج الرقم من الرابط أو النص
+                num_match = re.search(r'[-_](\d+)', href)
+                if not num_match:
+                    num_match = re.search(r'(\d+)', a.get_text(strip=True))
+                if num_match:
+                    number = int(num_match.group(1))
+
+            # استخراج العنوان
+            title_strong = li.select_one('strong.chapter-title')
+            title = title_strong.get_text(strip=True) if title_strong else a.get_text(strip=True)
+            # تنظيف العنوان من رقم الفصل إذا كان موجوداً
+            title = re.sub(r'^\d+\s*[-–]\s*', '', title).strip()
+
+            if number > 0 and full_url:
+                chapters.append({'number': number, 'url': full_url, 'title': title})
+
+        # ترتيب الفصول تصاعدياً
+        chapters.sort(key=lambda x: x['number'])
+        return chapters
+    except Exception as e:
+        print(f"Error FanMTL chapter list: {e}")
+        return chapters
+
+def scrape_chapter_fanmtl(url):
+    """استخراج محتوى الفصل من صفحة الفصل على fanmtl"""
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # البحث عن محتوى الفصل داخل div.chapter-content
+        content_div = soup.select_one('div.chapter-content')
+        if not content_div:
+            return None
+
+        # إزالة الإعلانات والعناصر غير المرغوب فيها
+        for script in content_div.find_all(['script', 'ins', 'div', 'center']):
+            # إذا كان العنصر يحتوي على إعلان أو نص غير مرغوب
+            if script.get('class') and any(c in ['adsbygoogle', 'code-block'] for c in script.get('class')):
+                script.decompose()
+            elif script.name == 'div' and script.get('align') == 'center':
+                script.decompose()
+            else:
+                # نحتفظ بالنص ولكن نزيل الوسوم
+                script.unwrap()
+
+        # استخراج النص من جميع فقرات p
+        paragraphs = content_div.find_all('p')
+        if paragraphs:
+            text_parts = []
+            for p in paragraphs:
+                p_text = p.get_text(strip=True)
+                if p_text:
+                    text_parts.append(p_text)
+            text = "\n\n".join(text_parts)
+        else:
+            # إذا لم نجد p، نأخذ النص كاملاً
+            text = content_div.get_text(separator="\n\n", strip=True)
+
+        # تنظيف النص من التكرارات والفراغات الزائدة
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text
+    except Exception as e:
+        print(f"Error scraping FanMTL chapter: {e}")
+        return None
+
+def worker_fanmtl_list(url, admin_email, metadata):
+    """العامل الخاص بموقع fanmtl لتشغيل عملية السحب"""
+    existing_chapters = check_existing_chapters(metadata['title'])
+    skip_meta = len(existing_chapters) > 0
+
+    # إرسال البيانات الوصفية الأولية
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
+
+    all_chapters = fetch_chapter_list_fanmtl(url)
+    if not all_chapters:
+        print(f"No chapters found for {metadata['title']} on FanMTL")
+        return
+
+    print(f"Found {len(all_chapters)} chapters on FanMTL. Processing...")
+
+    batch = []
+    for chap in all_chapters:
+        if chap['number'] in existing_chapters:
+            continue
+
+        print(f"Scraping FanMTL: Ch {chap['number']}...")
+        content = scrape_chapter_fanmtl(chap['url'])
+        if content:
+            batch.append({
+                'number': chap['number'],
+                'title': chap['title'],
+                'content': content
+            })
+            if len(batch) >= 5:
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+                batch = []
+                time.sleep(1)
+        else:
+            print(f"Failed to get content for chapter {chap['number']}")
+
+    if batch:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+
+# ==========================================
 # Main Orchestrator
 # ==========================================
 
@@ -1211,6 +1422,14 @@ def trigger_scrape():
             thread.start()
             return jsonify({'message': 'Scraping started (FreeWebNovel).'}), 200
 
+        # إضافة شرط موقع fanmtl
+        elif 'fanmtl.com' in url:
+            meta = fetch_metadata_fanmtl(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_fanmtl_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (FanMTL).'}), 200
+
         else:
             return jsonify({'message': 'Unsupported Domain'}), 400
             
@@ -1247,6 +1466,10 @@ def perform_single_scrape(url, admin_email):
         elif 'freewebnovel.com' in url:
             meta = fetch_metadata_freewebnovel(url)
             if meta: worker_freewebnovel_list(url, admin_email, meta)
+        # إضافة شرط fanmtl في السcheduler
+        elif 'fanmtl.com' in url:
+            meta = fetch_metadata_fanmtl(url)
+            if meta: worker_fanmtl_list(url, admin_email, meta)
     except Exception as e:
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
