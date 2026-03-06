@@ -1267,18 +1267,7 @@ def scrape_chapter_fanmtl(url):
         if not content_div:
             return None
 
-        # إزالة الإعلانات والعناصر غير المرغوب فيها
-        for script in content_div.find_all(['script', 'ins', 'div', 'center']):
-            # إذا كان العنصر يحتوي على إعلان أو نص غير مرغوب
-            if script.get('class') and any(c in ['adsbygoogle', 'code-block'] for c in script.get('class')):
-                script.decompose()
-            elif script.name == 'div' and script.get('align') == 'center':
-                script.decompose()
-            else:
-                # نحتفظ بالنص ولكن نزيل الوسوم
-                script.unwrap()
-
-        # استخراج النص من جميع فقرات p
+        # استخراج النص من جميع فقرات p مباشرةً (تجنب أي مشاكل مع الإعلانات)
         paragraphs = content_div.find_all('p')
         if paragraphs:
             text_parts = []
