@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, unquote, parse_qs
 
 
 # ==========================================
@@ -75,6 +75,25 @@ def fix_image_url(url, base_url='https://api.rewayat.club'):
         return base_url + url
     elif not url.startswith('http'):
         return base_url + '/' + url
+    return url
+
+def extract_real_url_from_google_translate(url):
+    """
+    استخراج الرابط الحقيقي من رابط ترجمة جوجل
+    مثال: https://translate.google.com/website?sl=zh&tl=ar&hl=ar&u=http://example.com/image.jpg
+    """
+    if not url or 'translate.google.com' not in url:
+        return url
+    try:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        if 'u' in query:
+            real_url = query['u'][0]
+            # فك ترميز URL
+            real_url = unquote(real_url)
+            return real_url
+    except Exception as e:
+        print(f"Error extracting real URL from Google Translate: {e}")
     return url
 
 def parse_relative_date(date_str):
@@ -1351,6 +1370,8 @@ def fetch_metadata_erciyan(url):
             img_tag = soup.select_one('.detail-box .imgbox img')
             if img_tag:
                 cover = img_tag.get('src') or img_tag.get('data-src') or ""
+        # استخراج الرابط الحقيقي إذا كان عبر ترجمة جوجل
+        cover = extract_real_url_from_google_translate(cover)
         cover = fix_image_url(cover, base_url=base_url)
 
         description = ""
