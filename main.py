@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -14,7 +13,7 @@ from urllib.parse import urlparse, urljoin
 
 
 # ==========================================
-# إعداداتتت التطبيق
+# إعدادات التطبيق
 # ==========================================
 app = Flask(__name__)
 CORS(app)
@@ -1315,6 +1314,223 @@ def worker_fanmtl_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
+# 🟤 7. ErCiYuan (二次元小说网) Logic (Chinese Site)
+# ==========================================
+
+def fetch_metadata_erciyuan(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Title from h1 in info box
+        title_tag = soup.select_one('div.info h1')
+        if not title_tag:
+            title_tag = soup.find('h1')
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+
+        # Cover image
+        cover = ""
+        img_tag = soup.select_one('div.imgbox img')
+        if img_tag:
+            cover = img_tag.get('src')
+        if not cover:
+            og_img = soup.find("meta", property="og:image")
+            if og_img:
+                cover = og_img["content"]
+        # Build full URL if relative
+        if cover and cover.startswith('/'):
+            parsed = urlparse(url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            cover = base + cover
+
+        # Description
+        desc_div = soup.select_one('div.desc')
+        if not desc_div:
+            desc_div = soup.select_one('div.m-desc')
+        description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
+
+        # Status and category from page text
+        status = "مستمرة"  # default ongoing
+        category = "عام"
+        tags = []
+
+        # Get all text in info div to extract status and category
+        info_div = soup.select_one('div.info')
+        if info_div:
+            info_text = info_div.get_text()
+            # Look for status: "状态：连载" (ongoing) or "状态：完结" (completed)
+            status_match = re.search(r'状态[：:]\s*([^\s]+)', info_text)
+            if status_match:
+                status_text = status_match.group(1)
+                if '完结' in status_text or 'مكتملة' in status_text or 'completed' in status_text.lower():
+                    status = "مكتملة"
+            # Look for category: "类　别：奇幻" etc.
+            cat_match = re.search(r'类[：:]\s*([^\s]+)', info_text)
+            if cat_match:
+                category = cat_match.group(1)
+            # Tags might be multiple, but we can add category as first tag
+            tags = [category] if category != "عام" else []
+
+        # Last update
+        last_update = None
+        update_text = None
+        # Find "最后更新：" and parse date
+        update_match = re.search(r'最后更新[：:]\s*(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{1,2}:\d{1,2})', soup.get_text())
+        if update_match:
+            update_text = update_match.group(1)
+            try:
+                # Convert to ISO format
+                dt = datetime.strptime(update_text, '%Y-%m-%d %H:%M:%S')
+                last_update = dt.isoformat()
+            except:
+                pass
+
+        return {
+            'title': title,
+            'description': description,
+            'cover': cover,
+            'status': status,
+            'category': category,
+            'tags': tags,
+            'sourceUrl': url,
+            'lastUpdate': last_update
+        }
+    except Exception as e:
+        print(f"Error ErCiYuan metadata: {e}")
+        return None
+
+def fetch_chapter_list_erciyuan(url):
+    chapters = []
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return chapters
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Find the chapter list (ul.section-list inside section-box)
+        section_box = soup.select_one('div.section-box')
+        if not section_box:
+            return chapters
+        chapter_items = section_box.select('ul.section-list li a')
+        if not chapter_items:
+            # Alternative: look for .section-list directly
+            chapter_items = soup.select('ul.section-list li a')
+
+        base_url = get_base_url(url)
+
+        for a in chapter_items:
+            href = a.get('href')
+            if not href:
+                continue
+            full_url = urljoin(base_url, href)
+            raw_title = a.get_text(strip=True)
+
+            # Extract chapter number from Chinese format: "第1章 title"
+            # Use regex to find number after "第" and before "章"
+            num_match = re.search(r'第(\d+)章', raw_title)
+            number = 0
+            if num_match:
+                number = int(num_match.group(1))
+            else:
+                # Fallback: try to find any number
+                num_fallback = re.search(r'(\d+)', raw_title)
+                if num_fallback:
+                    number = int(num_fallback.group(1))
+
+            # Clean title: remove the "第X章" part
+            clean_title = re.sub(r'^第\d+章\s*', '', raw_title).strip()
+            if not clean_title:
+                clean_title = raw_title
+
+            if number > 0:
+                chapters.append({'number': number, 'url': full_url, 'title': clean_title})
+
+        # Sort by number
+        chapters.sort(key=lambda x: x['number'])
+        return chapters
+    except Exception as e:
+        print(f"Error ErCiYuan chapter list: {e}")
+        return chapters
+
+def scrape_chapter_erciyuan(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Find content div
+        content_div = soup.find('div', id='content')
+        if not content_div:
+            content_div = soup.find('div', class_='content')
+
+        if not content_div:
+            return None
+
+        # Remove unwanted elements
+        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'div', 'a']):
+            # Remove ads or navigation elements if they have specific classes
+            if bad.get('class') and any(c in ['appguide-wrap', 'btn-addbs', 'section-opt'] for c in bad.get('class')):
+                bad.decompose()
+            # Also remove any element with id 'content' inside? no
+
+        # Get text from paragraphs
+        paragraphs = content_div.find_all('p')
+        if paragraphs:
+            text_parts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+            text = "\n\n".join(text_parts)
+        else:
+            # If no p tags, just get the whole text
+            text = content_div.get_text(separator="\n\n", strip=True)
+
+        # Clean common Chinese ad phrases
+        text = re.sub(r'本章未完，点击下一页继续阅读', '', text)
+        text = re.sub(r'请收藏本站：https?://\S+', '', text)
+        text = re.sub(r'最新章节请.*', '', text, flags=re.IGNORECASE)
+
+        return text if len(text.strip()) > 50 else None
+    except Exception as e:
+        print(f"Error scraping ErCiYuan chapter: {e}")
+        return None
+
+def worker_erciyuan_list(url, admin_email, metadata):
+    existing_chapters = check_existing_chapters(metadata['title'])
+    skip_meta = len(existing_chapters) > 0
+
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
+
+    all_chapters = fetch_chapter_list_erciyuan(url)
+    if not all_chapters:
+        print(f"No chapters found for {metadata['title']}")
+        return
+
+    print(f"Processing {len(all_chapters)} chapters from ErCiYuan.")
+
+    batch = []
+    for chap in all_chapters:
+        if chap['number'] in existing_chapters:
+            continue
+
+        print(f"Scraping ErCiYuan: Ch {chap['number']}...")
+        content = scrape_chapter_erciyuan(chap['url'])
+
+        if content:
+            batch.append({
+                'number': chap['number'],
+                'title': chap['title'],
+                'content': content
+            })
+            if len(batch) >= 5:
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+                batch = []
+                time.sleep(1)
+
+    if batch:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+
+# ==========================================
 # Main Orchestrator
 # ==========================================
 
@@ -1407,6 +1623,13 @@ def trigger_scrape():
             thread.start()
             return jsonify({'message': 'Scraping started (FanMTL).'}), 200
 
+        elif 'erciyan.com' in url or '二次元' in url:  # detect Chinese site
+            meta = fetch_metadata_erciyuan(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_erciyuan_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (ErCiYuan - Chinese Site).'}), 200
+
         else:
             return jsonify({'message': 'Unsupported Domain'}), 400
             
@@ -1446,6 +1669,9 @@ def perform_single_scrape(url, admin_email):
         elif 'fanmtl.com' in url:
             meta = fetch_metadata_fanmtl(url)
             if meta: worker_fanmtl_list(url, admin_email, meta)
+        elif 'erciyan.com' in url or '二次元' in url:
+            meta = fetch_metadata_erciyuan(url)
+            if meta: worker_erciyuan_list(url, admin_email, meta)
     except Exception as e:
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
