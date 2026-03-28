@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -1125,221 +1124,176 @@ def worker_freewebnovel_list(url, admin_email, metadata):
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
+
 # ==========================================
-# 🟡 6. FanMTL (fanmtl.com) Logic
+# 🟡 6. FanMTL Logic
 # ==========================================
 
 def fetch_metadata_fanmtl(url):
     try:
         response = requests.get(url, headers=get_headers(), timeout=15)
-        if response.status_code != 200:
-            return None
+        if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # العنوان
-        title_tag = soup.find('h1', itemprop='name')
-        if not title_tag:
-            title_tag = soup.find('h1', class_='novel-title')
+        # Title
+        title_tag = soup.select_one('h1.novel-title')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
 
-        # الكاتب
-        author_tag = soup.find('span', itemprop='author')
-        author = author_tag.get_text(strip=True) if author_tag else ""
-
-        # الغلاف
+        # Cover
         cover = ""
         img_tag = soup.select_one('figure.cover img')
         if img_tag:
             cover = img_tag.get('data-src') or img_tag.get('src')
         if not cover:
-            og_image = soup.find("meta", property="og:image")
-            if og_image:
-                cover = og_image["content"]
+            og_img = soup.find("meta", property="og:image")
+            if og_img:
+                cover = og_img.get('content', '')
         cover = fix_image_url(cover, base_url='https://fanmtl.com')
 
-        # الوصف
+        # Description
         desc_div = soup.select_one('.summary .content')
-        if not desc_div:
-            desc_div = soup.find('div', class_='summary')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
 
-        # الحالة
-        status = "مستمرة"
-        status_span = soup.select_one('.header-stats strong')
-        if status_span:
-            status_text = status_span.get_text(strip=True).lower()
-            if 'ongoing' not in status_text and 'completed' in status_text:
-                status = "مكتملة"
-            # ملاحظة: في الصفحة المعطاة الحالة مكتوبة "Ongoing" كنص مباشر، لذا سنعتبر المستمرة هي الافتراضية
-        else:
-            # البحث عن كلمة "مكتملة" أو "completed" في النص
-            if "completed" in soup.get_text().lower() or "مكتملة" in soup.get_text():
-                status = "مكتملة"
+        # Categories + Tags
+        categories = []
+        for a in soup.select('.categories a.property-item'):
+            txt = a.get_text(strip=True)
+            if txt:
+                categories.append(txt)
 
-        # التصنيفات
         tags = []
-        categories_div = soup.find('div', class_='categories')
-        if categories_div:
-            tag_links = categories_div.find_all('a')
-            for a in tag_links:
-                tag_text = a.get_text(strip=True)
-                if tag_text and tag_text not in tags:
-                    tags.append(tag_text)
-        category = tags[0] if tags else "عام"
+        for a in soup.select('.tags a.tag, .categories a.tag'):
+            txt = a.get_text(strip=True)
+            if txt:
+                tags.append(txt)
 
-        # آخر تحديث (من قائمة الفصول)
+        category = categories[0] if categories else (tags[0] if tags else "عام")
+        all_tags = categories + [t for t in tags if t not in categories]
+
+        # Status
+        status = "مستمرة"
+        for strong in soup.select('.header-stats strong'):
+            txt = strong.get_text(strip=True).lower()
+            if 'completed' in txt or 'complete' in txt or 'مكتملة' in txt:
+                status = "مكتملة"
+                break
+
+        # Last Update
         last_update = None
-        latest_chapter = soup.select_one('.chapter-list li:first-child time')
-        if latest_chapter:
-            last_update = parse_relative_date(latest_chapter.get_text(strip=True))
+        update_node = soup.select_one('ul.chapter-list li time.chapter-update')
+        if update_node:
+            last_update = parse_relative_date(update_node.get_text(strip=True))
 
         return {
-            'title': title,
-            'description': description,
-            'cover': cover,
-            'status': status,
-            'category': category,
-            'tags': tags,
-            'author': author,
-            'sourceUrl': url,
-            'lastUpdate': last_update
+            'title': title, 'description': description, 'cover': cover,
+            'status': status, 'category': category, 'tags': all_tags,
+            'sourceUrl': url, 'lastUpdate': last_update
         }
     except Exception as e:
-        print(f"Error FanMTL metadata: {e}")
+        print(f"Error FanMTL Meta: {e}")
         return None
 
-def fetch_chapter_list_fanmtl(novel_url):
-    """جلب جميع الفصول من FanMTL مع دعم التنقل بين الصفحات"""
+def fetch_chapter_list_fanmtl(url):
     chapters = []
-    base_url = 'https://fanmtl.com'
+    visited_pages = set()
+
     try:
-        current_page_url = novel_url  # الصفحة الرئيسية للرواية (تحتوي على أول 100 فصل)
-        page_num = 1
+        current_url = url
 
-        while True:
-            print(f"🔍 Fetching FanMTL chapters from page {page_num}...")
-            # في بعض الأحيان الروابط تكون معلمة بـ ?page= ولكن في الملف المعطى كانت الفصول مباشرة في الصفحة الرئيسية.
-            # لكن نضيف دعم للصفحات الأخرى إن وجدت.
-            if page_num > 1:
-                # نحاول إضافة ?page= إلى الرابط
-                if '?' in current_page_url:
-                    current_page_url = f"{novel_url}&page={page_num}"
-                else:
-                    current_page_url = f"{novel_url}?page={page_num}"
+        while current_url and current_url not in visited_pages:
+            visited_pages.add(current_url)
+            print(f"🔍 Fetching chapters from FanMTL: {current_url}")
 
-            response = requests.get(current_page_url, headers=get_headers(), timeout=15)
+            response = requests.get(current_url, headers=get_headers(), timeout=15)
             if response.status_code != 200:
                 break
 
             soup = BeautifulSoup(response.content, 'html.parser')
-            chapter_list = soup.select('ul.chapter-list li a')
-            if not chapter_list:
-                # إذا لم نجد أي عناصر، نخرج من الحلقة
+            items = soup.select('ul.chapter-list li a')
+            if not items:
                 break
 
-            for a in chapter_list:
+            for a in items:
                 href = a.get('href')
-                full_link = urljoin(base_url, href)
-                # استخراج الرقم من الرابط مثلاً /novel/re-evolution-online_1.html
-                num_match = re.search(r'_(\d+)\.html', href)
-                if not num_match:
-                    # محاولة استخراج الرقم من النص
-                    num_match = re.search(r'(\d+)', a.get_text(strip=True))
-                number = int(num_match.group(1)) if num_match else 0
-                if number == 0:
+                if not href:
                     continue
-                # عنوان الفصل يأتي أحياناً داخل <strong class="chapter-title">
-                title_tag = a.find('strong', class_='chapter-title')
-                if title_tag:
-                    title = title_tag.get_text(strip=True)
-                else:
-                    title = a.get_text(strip=True)
-                chapters.append({'number': number, 'url': full_link, 'title': title})
 
-            # التحقق من وجود زر للصفحة التالية
-            next_btn = soup.select_one('ul.pagination a[rel="next"]')
-            if not next_btn:
-                # محاولة البحث عن رابط ">" الذي يشير للصفحة التالية
-                pagination_links = soup.select('ul.pagination li a')
-                for link in pagination_links:
-                    if '>' in link.get_text() or 'Next' in link.get_text():
-                        next_btn = link
-                        break
-            if next_btn:
-                page_num += 1
+                full_link = urljoin('https://fanmtl.com', href)
+                raw_title = a.get('title') or a.get_text(" ", strip=True)
+
+                chapter_no = a.select_one('.chapter-no')
+                number = 0
+                if chapter_no:
+                    try:
+                        number = int(chapter_no.get_text(strip=True))
+                    except:
+                        number = 0
+
+                if number == 0:
+                    num_match = re.search(r'_(\d+)\.html', full_link)
+                    if not num_match:
+                        num_match = re.search(r'Chapter\s+(\d+)', raw_title, re.IGNORECASE)
+                    if not num_match:
+                        num_match = re.search(r'(\d+)', raw_title)
+                    if num_match:
+                        number = int(num_match.group(1))
+
+                title_node = a.select_one('.chapter-title')
+                chapter_title = title_node.get_text(strip=True) if title_node else raw_title
+
+                if number > 0:
+                    chapters.append({'number': number, 'url': full_link, 'title': chapter_title})
+
+            next_url = None
+            pagination_links = soup.select('.pagination li a')
+            for link in pagination_links:
+                text = link.get_text(strip=True)
+                href = link.get('href')
+                if href and text == '>':
+                    next_url = urljoin('https://fanmtl.com', href)
+                    break
+
+            current_url = next_url
+            if current_url:
                 time.sleep(0.5)
-            else:
-                break
 
-        # إزالة التكرار وترتيب الفصول حسب الرقم
-        unique = {c['number']: c for c in chapters}.values()
-        chapters = list(unique)
+        unique_chapters = {c['number']: c for c in chapters}.values()
+        chapters = list(unique_chapters)
         chapters.sort(key=lambda x: x['number'])
-        print(f"✅ Total FanMTL chapters: {len(chapters)}")
+        print(f"✅ Total FanMTL chapters found: {len(chapters)}")
         return chapters
     except Exception as e:
-        print(f"Error fetching FanMTL chapter list: {e}")
+        print(f"Error FanMTL List: {e}")
         return []
 
 def scrape_chapter_fanmtl(url):
     try:
         response = requests.get(url, headers=get_headers(), timeout=15)
-        if response.status_code != 200:
-            return None
+        if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # محتوى الفصل موجود في div.chapter-content
-        content_div = soup.select_one('div.chapter-content')
-        if not content_div:
-            return None
+        content_div = soup.select_one('.chapter-content')
+        if not content_div: return None
 
-        # إزالة الإعلانات والسكربتات
-        for bad in content_div.find_all(['script', 'style', 'ins', 'div']):
-            # نحتفظ بعلامات <p> ولكن نحذف العناصر التي تبدو كإعلانات
-            if bad.get('class') and any(c in ['ads', 'ad', 'code-block'] for c in bad.get('class')):
-                bad.decompose()
-            elif bad.name == 'div' and not bad.find('p'):
-                # بعض الإعلانات تكون داخل div بدون فقرات
-                bad.decompose()
-            else:
-                # نزيل العناصر غير المرغوب فيها ولكن نحافظ على النص
-                bad.unwrap()  # نقل النص إلى الخارج
+        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'button', 'div']):
+            bad.decompose()
 
-        # استخراج النص من جميع فقرات <p>
-        paragraphs = content_div.find_all('p')
-        if paragraphs:
-            text_parts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
-            text = "\n\n".join(text_parts)
-        else:
-            # إذا لم نجد <p> نأخذ كل النص
-            text = content_div.get_text(separator="\n\n", strip=True)
-
-        # تنظيف إضافي
+        text = content_div.get_text(separator="\n\n", strip=True)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'<script.*?>.*?</script>', '', text, flags=re.DOTALL)
-        return text
-    except Exception as e:
-        print(f"Error scraping FanMTL chapter {url}: {e}")
+        return text if text else None
+    except:
         return None
 
 def worker_fanmtl_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
 
-    # إرسال الميتاداتا أولاً (بدون فصول)
-    send_data_to_backend({
-        'adminEmail': admin_email,
-        'novelData': metadata,
-        'chapters': [],
-        'skipMetadataUpdate': skip_meta
-    })
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
     all_chapters = fetch_chapter_list_fanmtl(url)
     if not all_chapters:
         print(f"No chapters found for {metadata['title']}")
         return
-
-    print(f"Processing {len(all_chapters)} chapters for FanMTL.")
 
     batch = []
     for chap in all_chapters:
@@ -1348,6 +1302,220 @@ def worker_fanmtl_list(url, admin_email, metadata):
 
         print(f"Scraping FanMTL: Ch {chap['number']}...")
         content = scrape_chapter_fanmtl(chap['url'])
+
+        if content:
+            batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
+            if len(batch) >= 5:
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+                batch = []
+                time.sleep(1)
+
+    if batch:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
+
+# ==========================================
+# 🟤 7. ErCiYuan (二次元小说网) Logic (Chinese Site)
+# ==========================================
+
+def fetch_metadata_erciyuan(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Title from h1 in info box
+        title_tag = soup.select_one('div.info h1')
+        if not title_tag:
+            title_tag = soup.find('h1')
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+
+        # Cover image
+        cover = ""
+        img_tag = soup.select_one('div.imgbox img')
+        if img_tag:
+            cover = img_tag.get('src')
+        if not cover:
+            og_img = soup.find("meta", property="og:image")
+            if og_img:
+                cover = og_img["content"]
+        # Build full URL if relative
+        if cover and cover.startswith('/'):
+            parsed = urlparse(url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            cover = base + cover
+
+        # Description
+        desc_div = soup.select_one('div.desc')
+        if not desc_div:
+            desc_div = soup.select_one('div.m-desc')
+        description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
+
+        # Status and category from page text
+        status = "مستمرة"  # default ongoing
+        category = "عام"
+        tags = []
+
+        # Get all text in info div to extract status and category
+        info_div = soup.select_one('div.info')
+        if info_div:
+            info_text = info_div.get_text()
+            # Look for status: "状态：连载" (ongoing) or "状态：完结" (completed)
+            status_match = re.search(r'状态[：:]\s*([^\s]+)', info_text)
+            if status_match:
+                status_text = status_match.group(1)
+                if '完结' in status_text or 'مكتملة' in status_text or 'completed' in status_text.lower():
+                    status = "مكتملة"
+            # Look for category: "类　别：奇幻" etc.
+            cat_match = re.search(r'类[：:]\s*([^\s]+)', info_text)
+            if cat_match:
+                category = cat_match.group(1)
+            # Tags might be multiple, but we can add category as first tag
+            tags = [category] if category != "عام" else []
+
+        # Last update
+        last_update = None
+        update_text = None
+        # Find "最后更新：" and parse date
+        update_match = re.search(r'最后更新[：:]\s*(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{1,2}:\d{1,2})', soup.get_text())
+        if update_match:
+            update_text = update_match.group(1)
+            try:
+                # Convert to ISO format
+                dt = datetime.strptime(update_text, '%Y-%m-%d %H:%M:%S')
+                last_update = dt.isoformat()
+            except:
+                pass
+
+        return {
+            'title': title,
+            'description': description,
+            'cover': cover,
+            'status': status,
+            'category': category,
+            'tags': tags,
+            'sourceUrl': url,
+            'lastUpdate': last_update
+        }
+    except Exception as e:
+        print(f"Error ErCiYuan metadata: {e}")
+        return None
+
+def fetch_chapter_list_erciyuan(url):
+    chapters = []
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return chapters
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Find the chapter list (ul.section-list inside section-box)
+        section_box = soup.select_one('div.section-box')
+        if not section_box:
+            return chapters
+        chapter_items = section_box.select('ul.section-list li a')
+        if not chapter_items:
+            # Alternative: look for .section-list directly
+            chapter_items = soup.select('ul.section-list li a')
+
+        base_url = get_base_url(url)
+
+        for a in chapter_items:
+            href = a.get('href')
+            if not href:
+                continue
+            full_url = urljoin(base_url, href)
+            raw_title = a.get_text(strip=True)
+
+            # Extract chapter number from Chinese format: "第1章 title"
+            # Use regex to find number after "第" and before "章"
+            num_match = re.search(r'第(\d+)章', raw_title)
+            number = 0
+            if num_match:
+                number = int(num_match.group(1))
+            else:
+                # Fallback: try to find any number
+                num_fallback = re.search(r'(\d+)', raw_title)
+                if num_fallback:
+                    number = int(num_fallback.group(1))
+
+            # Clean title: remove the "第X章" part
+            clean_title = re.sub(r'^第\d+章\s*', '', raw_title).strip()
+            if not clean_title:
+                clean_title = raw_title
+
+            if number > 0:
+                chapters.append({'number': number, 'url': full_url, 'title': clean_title})
+
+        # Sort by number
+        chapters.sort(key=lambda x: x['number'])
+        return chapters
+    except Exception as e:
+        print(f"Error ErCiYuan chapter list: {e}")
+        return chapters
+
+def scrape_chapter_erciyuan(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Find content div
+        content_div = soup.find('div', id='content')
+        if not content_div:
+            content_div = soup.find('div', class_='content')
+
+        if not content_div:
+            return None
+
+        # Remove unwanted elements
+        for bad in content_div.find_all(['script', 'style', 'ins', 'iframe', 'div', 'a']):
+            # Remove ads or navigation elements if they have specific classes
+            if bad.get('class') and any(c in ['appguide-wrap', 'btn-addbs', 'section-opt'] for c in bad.get('class')):
+                bad.decompose()
+            # Also remove any element with id 'content' inside? no
+
+        # Get text from paragraphs
+        paragraphs = content_div.find_all('p')
+        if paragraphs:
+            text_parts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+            text = "\n\n".join(text_parts)
+        else:
+            # If no p tags, just get the whole text
+            text = content_div.get_text(separator="\n\n", strip=True)
+
+        # Clean common Chinese ad phrases
+        text = re.sub(r'本章未完，点击下一页继续阅读', '', text)
+        text = re.sub(r'请收藏本站：https?://\S+', '', text)
+        text = re.sub(r'最新章节请.*', '', text, flags=re.IGNORECASE)
+
+        return text if len(text.strip()) > 50 else None
+    except Exception as e:
+        print(f"Error scraping ErCiYuan chapter: {e}")
+        return None
+
+def worker_erciyuan_list(url, admin_email, metadata):
+    existing_chapters = check_existing_chapters(metadata['title'])
+    skip_meta = len(existing_chapters) > 0
+
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
+
+    all_chapters = fetch_chapter_list_erciyuan(url)
+    if not all_chapters:
+        print(f"No chapters found for {metadata['title']}")
+        return
+
+    print(f"Processing {len(all_chapters)} chapters from ErCiYuan.")
+
+    batch = []
+    for chap in all_chapters:
+        if chap['number'] in existing_chapters:
+            continue
+
+        print(f"Scraping ErCiYuan: Ch {chap['number']}...")
+        content = scrape_chapter_erciyuan(chap['url'])
+
         if content:
             batch.append({
                 'number': chap['number'],
@@ -1355,24 +1523,12 @@ def worker_fanmtl_list(url, admin_email, metadata):
                 'content': content
             })
             if len(batch) >= 5:
-                send_data_to_backend({
-                    'adminEmail': admin_email,
-                    'novelData': metadata,
-                    'chapters': batch,
-                    'skipMetadataUpdate': True
-                })
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
-                time.sleep(1.5)
-        else:
-            print(f"Warning: Failed to fetch content for chapter {chap['number']}")
+                time.sleep(1)
 
     if batch:
-        send_data_to_backend({
-            'adminEmail': admin_email,
-            'novelData': metadata,
-            'chapters': batch,
-            'skipMetadataUpdate': True
-        })
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # Main Orchestrator
@@ -1467,6 +1623,13 @@ def trigger_scrape():
             thread.start()
             return jsonify({'message': 'Scraping started (FanMTL).'}), 200
 
+        elif 'erciyan.com' in url or '二次元' in url:  # detect Chinese site
+            meta = fetch_metadata_erciyuan(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_erciyuan_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (ErCiYuan - Chinese Site).'}), 200
+
         else:
             return jsonify({'message': 'Unsupported Domain'}), 400
             
@@ -1506,6 +1669,9 @@ def perform_single_scrape(url, admin_email):
         elif 'fanmtl.com' in url:
             meta = fetch_metadata_fanmtl(url)
             if meta: worker_fanmtl_list(url, admin_email, meta)
+        elif 'erciyan.com' in url or '二次元' in url:
+            meta = fetch_metadata_erciyuan(url)
+            if meta: worker_erciyuan_list(url, admin_email, meta)
     except Exception as e:
         print(f"⚠️ Scheduler Error for {url}: {e}")
 
